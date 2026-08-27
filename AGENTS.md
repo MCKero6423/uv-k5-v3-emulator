@@ -89,26 +89,125 @@ reported `IDR=0x0000` for several rounds because its regex did not match gdb's
 output format at all. The register was fine; the reader was broken. Cross-check
 with `tools/gpiob_dump.sh`, which uses a different path.
 
-## Known gap: the keypad
+## The keypad: two separate problems, one fixed
 
-Keypresses reach the firmware but the UI does not react. What is established:
+The old note here said "keys reach the firmware but the UI does not react" and
+pointed at the machine model. The model was not the problem. There were two
+independent causes, and only the first is fixed.
 
-- The keypad model holds the right state (`qom-get press` reads back the key)
-- Row lines are driven: TRACE shows `row0 -> 0` while MENU is held
-- The firmware's scan sees it: at the IDR read inside `KEYBOARD_Poll`,
-  `ODR=033c IDR=7fbf` — column 1 low, row 0 low
-- `KEYBOARD_Poll` returns 10, which is `KEY_MENU` in `driver/keyboard.h`
+### Fixed: key.py held keys far too long
 
-So the matrix works and the scan decodes correctly. Whatever is wrong is
-downstream, in how `app.c` debounces or dispatches the returned key. That is
-where to look — not at the wiring, which has been checked more than enough.
+`tools/key.py` was holding every key for 2500 ms.
+
+The two SysTick mechanisms are separate, and conflating them caused this:
+
+- SysTick **interrupts** fire at close to real time. `SysTick_Handler` sets
+  `gNextTimeslice`, which gates `APP_TimeSlice10ms` -> `CheckKeys`. So the
+  debounce thresholds in `App/misc.c` apply in wall clock as written:
+  `key_debounce_10ms = 2` (20 ms to register), `key_repeat_delay_10ms = 40`
+  (400 ms counts as *held*).
+- The `poll-boost` property accelerates SysTick counter **reads**, so
+  `SYSTICK_DelayUs` converges. It does not speed up interrupt delivery.
+
+A 2500 ms hold is ~250 ticks, six times past the long-press threshold. Every
+press was dispatched as a hold, and the handlers act on a short release:
+`MAIN_Key_MENU` returns early at the `if (bKeyHeld)` branch and never opens the
+menu. Confirmed by reading `gDebounceCounter` mid-hold — it stood at 317 after a
+3 s hold, which both proves the timeslice is running and shows the hold was far
+too long.
+
+Current values in `key.py`: `HOLD_MS = 200`, `LONG_HOLD_MS = 900`. Verified end
+to end — `key.py MENU DOWN DOWN` moves the menu from 01/79 to 03/79, and
+`key.py UP` moves it back to 02/79.
+
+If a press seems ignored, do not lengthen the hold. Check whether the handler
+wanted a short press, and check `gEeprom.KEY_LOCK` (the LCD draws a padlock when
+the keypad is locked, and ignoring keys is then correct behaviour).
+
+### Driving the menus: send a sequence as one burst
+
+Three things will make a key sequence land somewhere you did not intend. All
+three cost time here.
+
+**gdb between presses halts the guest.** Every `gdb-multiarch -batch` attach
+stops the machine for its duration. Inspecting `gMenuCursor` after each press
+stretches a six-press sequence past the 20 s menu timeout
+(`menu_timeout_500ms` in `App/misc.c`), so the UI silently falls back to the main
+screen and the rest of the presses tune the VFO instead of navigating. Send the
+whole sequence in one Python burst over QMP, then read state once at the end.
+
+**UP/DOWN are inverted inside a submenu.** `MENU_Key_UP_DOWN` flips `Direction`
+when `gIsInSubMenu` and `!gEeprom.SET_NAV` (`app/menu.c:2311`). In the list DOWN
+moves down; editing a value, UP *decreases* it. Values also clamp at
+`MENU_GetLimits` rather than wrapping, so overshooting sticks at the limit.
+
+**MENU toggles rather than only entering.** On the main screen a short MENU opens
+the menu; in the list it enters the submenu; in a submenu it commits
+(`gFlagAcceptSetting = true`) and steps back out. Two MENU presses in a row from
+the list therefore enter and immediately leave, which looks like nothing
+happened.
+
+Numeric jump: typing a menu number in the list jumps straight to it, which beats
+counting DOWN presses. Single digits are reliable. Two-digit entry needs both
+presses inside the same input-box window, and `MENU_Key_0_to_9` jumps and returns
+as soon as the first digit is a valid index (`app/menu.c:1826`), so `3` then `0`
+lands on 3 rather than 30. Pre-positioning `gMenuCursor` with gdb, in one attach
+right after opening the menu, is the reliable way to reach a distant entry.
+
+Verified this way: menu opens, DOWN/UP move the list, MENU enters a submenu, and
+a digit selects a value. Screenshots confirmed BatSav at 30/79 showing OFF.
+
+### Known limitation: power save stops the keypad scan
+
+The keypad works, but only while the radio is awake. Measured on a fresh boot:
+`gCurrentFunction` is 0 (`FUNCTION_FOREGROUND`) until about 6 s, then becomes 5
+(`FUNCTION_POWER_SAVE`) and the scan stops:
+
+    gRxIdleMode=1  gCurrentFunction=5
+
+From then on `KEYBOARD_Poll` returns `KEY_INVALID` however long or often a key is
+held — eight consecutive `key.py MENU` presses left `gKeyReading0` at 19 and
+`gScreenToDisplay` at 0. A real radio wakes on a keypress, so this is a gap in
+the model rather than firmware behaviour. The suspect is the sleep/wake path in
+`HandlePowerSave`, which calls `BK4819_Sleep()` and spins on `BK4819_REG_0C`
+bit 0 over the bit-banged bus. Note that bus shares GPIOB with the keypad (bus on
+PB8/PB9, columns PB3-PB6, rows PB12-PB15), and the model idles PB9 low as a
+deliberate hack so those reads return zero — worth a look when someone picks this
+up.
+
+Working around it is easy and does not need the gap closed: any keypad activity
+keeps the radio awake, and being in the menu blocks power save outright
+(`gScreenToDisplay != DISPLAY_MAIN` guards the entry at `app/app.c:1377`). So
+open the menu within the first few seconds of boot and a session stays usable
+indefinitely. Turning BatSav off through the UI works too, though the setting
+does not survive a restart — see below.
+
+Two dead ends, both confirmed by experiment, so nobody repeats them:
+
+- **Patching battery save in `assets/flash.img` does nothing.**
+  `SETTINGS_InitEEPROM` compares a version string at flash `0x00A160`, finds a
+  mismatch on a fresh image, and writes the settings sector.
+  `PY25Q16_WriteBuffer` erases the whole 4 KB sector before reprogramming, so a
+  byte planted at `0x00A00B` is gone before the read at `settings.c:169` sees it.
+- **Guest-side settings changes do not persist.** The emulated PY25Q16 loads the
+  image into RAM at realize time and never writes back, so anything the firmware
+  saves is lost on restart. Adding a flush would be the real fix if persistent
+  settings are ever wanted.
 
 Useful here: `tools/scan_trace.sh` (what the scan reads), `tools/key_result.sh`
-(what Poll returns), `tools/trace_run.sh` (the TRACE points, currently compiled
-in).
+(what Poll returns), `tools/trace_run.sh` (the TRACE points).
 
-There is `fprintf(stderr, "TRACE ...")` instrumentation in `qemu/py32f071.c` at
-three points. Remove it once the keypad works.
+The three `fprintf(stderr, "TRACE ...")` probes that used to sit in
+`qemu/py32f071.c` are gone -- they fired on every keypad poll and buried the
+console. If you need them back while chasing the power save gap, they went in
+`py32_gpio_set_input`, `keypad_update_rows` and `keypad_col_changed`; `git log -p
+-- qemu/py32f071.c` has the exact lines. `grep -c 'keypad row0 -> 0'` on the
+captured stderr was how the matrix got confirmed working, and it is still the
+quickest check that a press reaches the model.
+
+Note the ELF at `uvk5-sat/build/CW/nr7y.cw.elf` carries no DWARF, so gdb reports
+`'gEeprom' has unknown type`. Scalars work if you cast through their address
+(`*(unsigned short*)&gDebounceCounter`); struct fields need manual offsets.
 
 ## What this cannot do
 

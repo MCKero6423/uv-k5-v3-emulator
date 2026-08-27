@@ -314,8 +314,6 @@ static void py32_gpio_set_input(void *opaque, int line, int level)
     if (line < 0 || line >= PY32_GPIO_PINS) {
         return;
     }
-    fprintf(stderr, "TRACE gpio%s set_input pin=%d level=%d\n",
-            s->port_name ?: "?", line, level);
     if (level) {
         s->idr |= (1u << line);
     } else {
@@ -445,8 +443,6 @@ static void keypad_update_rows(UVK5KeypadState *s)
         if (all_cols_high && s->pressed[0][r]) {
             low = true;
         }
-        fprintf(stderr, "TRACE keypad row%d -> %d (irq=%p)\n",
-                r, low ? 0 : 1, (void *)s->row_out[r]);
         qemu_set_irq(s->row_out[r], low ? 0 : 1);
     }
 }
@@ -458,7 +454,6 @@ static void keypad_col_changed(void *opaque, int line, int level)
     if (line < 1 || line >= KEYPAD_COLS) {
         return;
     }
-    fprintf(stderr, "TRACE keypad col%d level=%d\n", line, level);
     s->col_high[line] = level != 0;
     keypad_update_rows(s);
 }
@@ -737,10 +732,8 @@ static void py32_spi_class_init(ObjectClass *klass, void *data)
  * Layout from py32f071xB.h: ISR 0x00, IFCR 0x04, then per-channel blocks of
  * 0x14 starting at 0x08 (CCR, CNDTR, CPAR, CMAR).
  */
-/* Forward declarations: the DMA model clocks bytes through an SPI controller,
- * whose definition appears earlier but whose accessor is declared there. */
-typedef struct PY32SpiState PY32SpiState;
-uint8_t py32_spi_xfer_byte(PY32SpiState *s, uint8_t out);
+/* The DMA model clocks bytes through an SPI controller. Both PY32SpiState and
+ * py32_spi_xfer_byte() are already defined above, so no redeclaration here. */
 
 #define TYPE_PY32_DMA "py32-dma"
 OBJECT_DECLARE_SIMPLE_TYPE(PY32DmaState, PY32_DMA)

@@ -7,3 +7,6 @@ build/
 # Transient debug captures.
 *.log
 *.png
+
+# Screenshots used in the README are committed on purpose.
+!docs/screenshots/*.png

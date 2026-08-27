@@ -21,16 +21,20 @@ import time
 QMP_SOCKET = "/tmp/uvk5-qmp.sock"
 KEYPAD_PATH = "/machine/keypad"
 
-# App/app/app.c debounces with key_debounce_10ms = 2 and treats
-# key_repeat_delay_10ms = 40 as a long press. Guest time runs fast under
-# emulation, so these are generous rather than exact.
-# Guest time runs fast under emulation (SysTick reads are accelerated so busy-wait
-# delays converge), so a press has to be held far longer in wall-clock terms than
-# on real hardware for the firmware's debounce to complete. Measured: 400 ms was
-# too short to register at all.
-HOLD_MS = 2500
-LONG_HOLD_MS = 6000
-GAP_MS = 1200
+# App/app/app.c debounces in 10 ms timeslices driven by the SysTick interrupt:
+#   key_debounce_10ms     =  2  -> 20 ms to register a press
+#   key_repeat_delay_10ms = 40  -> 400 ms counts as a key *held*
+#
+# SysTick *interrupts* fire at close to real time here, so these thresholds apply
+# in wall clock as written. The `poll-boost` property accelerates SysTick counter
+# *reads* (so SYSTICK_DelayUs converges); it does not speed up interrupt delivery.
+# Do not conflate the two -- an earlier HOLD_MS of 2500 assumed it did, which put
+# every press ~250 ticks past the long-press threshold. Handlers like
+# MAIN_Key_MENU act only on a short release and return early when bKeyHeld is
+# set, so the UI appeared to ignore every key.
+HOLD_MS = 200          # ~20 ticks: past debounce, well short of the 40-tick hold
+LONG_HOLD_MS = 900     # ~90 ticks: comfortably past the hold threshold
+GAP_MS = 400           # let the release be debounced before the next press
 
 KEYS = [
     "MENU", "UP", "DOWN", "EXIT", "F", "STAR",

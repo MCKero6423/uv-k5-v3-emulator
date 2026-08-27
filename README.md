@@ -3,9 +3,18 @@
 Runs Quansheng UV-K5 V3 / UV-K1 firmware on a PC. The radio uses a Puya
 PY32F071 (Cortex-M0+), which QEMU has no machine for, so this adds one.
 
-The firmware boots to its main loop in about five seconds and the LCD contents
-are readable. Keypresses reach the firmware's scan but are not yet acted on --
-see [Status](#status).
+The firmware boots to its main loop in about five seconds, the LCD contents are
+readable, and the keypad drives the menus. See [Status](#status) for what is and
+is not modelled.
+
+| Main screen | Menu | Navigated with keys |
+| --- | --- | --- |
+| ![main VFO screen](docs/screenshots/main-vfo.png) | ![menu at Step](docs/screenshots/menu-step.png) | ![menu at BatSav](docs/screenshots/menu-batsav.png) |
+
+Real captures, not mock-ups: `tools/screenshot.py` reads the firmware's
+`gFrameBuffer` out of guest memory and renders it, so these are the pixels the
+LCD driver actually wrote. Left to right: the dual-watch main screen, the menu
+opened with `key.py MENU`, and entry 30/79 reached with keypresses.
 
 ## What it is for
 
@@ -28,9 +37,24 @@ has no public datasheet, so its driver is the only specification available.
 | Boot to main loop | works, ~5 s |
 | LCD contents | readable via `tools/screenshot.py` |
 | SPI flash, settings, calibration | works |
-| Keypad matrix | rows reach the firmware's scan (`KEYBOARD_Poll` returns the right key code) but the UI does not react — under investigation |
+| Keypad and menu navigation | works while the radio is awake; power save stops the scan, see below |
 | Timing accuracy | deliberately wrong, see [Timing](#timing) |
 | Radio/RF behaviour | not modelled |
+
+A short `tools/key.py MENU` opens the menu, UP/DOWN move through it, MENU enters
+a submenu, and typing a menu number jumps straight to that entry. Press duration
+decides short versus held, which the firmware treats as different events -- see
+[Timing](#timing).
+
+The limitation is power save. Around six seconds after boot the firmware enters
+it (`gCurrentFunction` becomes `FUNCTION_POWER_SAVE`) and stops scanning the
+keypad, so keys are ignored from then on. A real radio wakes on a keypress, so
+this is a gap in the machine model rather than firmware behaviour.
+
+In practice it is not much of an obstacle: keypad activity keeps the radio awake,
+and being in the menu blocks power save entirely. Open the menu within the first
+few seconds of boot and the session stays usable. `AGENTS.md` has the details,
+including two approaches that look like fixes and are not.
 
 ## Layout
 
@@ -39,6 +63,7 @@ has no public datasheet, so its driver is the only specification available.
       armv7m_systick.*.patched  SysTick with the poll-boost property added
     assets/
       calibration.bin        512-byte dump from a real radio
+    docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
     harness/, stubs/, shim/, tests/   host build of the CW timing chain (stage A)
 
@@ -148,6 +173,17 @@ re-anchor the count — the reported value stopped changing, the firmware's
 The consequence is that guest time runs fast during any delay. Fine for
 exercising menus and control flow; wrong for judging signal timing.
 
+`poll-boost` accelerates counter **reads** only. SysTick **interrupts** still
+fire at close to real time, and those are what drive `SysTick_Handler` ->
+`gNextTimeslice` -> `APP_TimeSlice10ms` -> `CheckKeys`. So the firmware's 10 ms
+timeslice thresholds hold in wall clock: a key must be down for 20 ms to
+register and 400 ms makes it a long press.
+
+Keeping those two apart matters. `tools/key.py` originally held keys for 2500 ms
+on the assumption that guest time ran fast here too, which turned every press
+into a long press. Handlers that act on a short release — `MAIN_Key_MENU` among
+them — ignored all of it, and the keypad looked broken when it was not.
+
 ## Stage A: the CW timing chain on the host
 
 `harness/`, `stubs/`, `shim/` and `tests/` compile `app/cwkeyer.c` and
@@ -160,6 +196,15 @@ on a host would let the tests drift from what the radio runs. The debounce in
 `CW_ReadKeys` is transcribed rather than stubbed, because its asymmetry (three
 consecutive reads to register a press, immediate release) is part of the timing
 behaviour under test.
+
+## Licence
+
+Apache 2.0, see [LICENSE](LICENSE).
+
+One exception: `qemu/py32f071.c` is licensed GPL-2.0-or-later, as its header
+states. It is built into QEMU and derives from QEMU's device models, which are
+GPL-2.0, so it cannot be anything else. The tools, harness and documentation are
+Apache 2.0.
 
 ## Credits
 
