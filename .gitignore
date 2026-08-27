@@ -1,0 +1,9 @@
+# Generated flash image: 2 MB, rebuilt from calibration.bin by tools/make_flash.py.
+assets/flash.img
+
+# Host build output for the CW timing harness.
+build/
+
+# Transient debug captures.
+*.log
+*.png
