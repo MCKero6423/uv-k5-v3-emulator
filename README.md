@@ -9,12 +9,12 @@ is not modelled.
 
 | Main screen | Menu | Navigated with keys |
 | --- | --- | --- |
-| ![main VFO screen](docs/screenshots/main-vfo.png) | ![menu at Step](docs/screenshots/menu-step.png) | ![menu at BatSav](docs/screenshots/menu-batsav.png) |
+| ![main VFO screen](docs/screenshots/main-vfo.png) | ![menu at Step](docs/screenshots/menu-step.png) | ![menu at RxDCS](docs/screenshots/menu-navigated.png) |
 
 Real captures, not mock-ups: `tools/screenshot.py` reads the firmware's
 `gFrameBuffer` out of guest memory and renders it, so these are the pixels the
 LCD driver actually wrote. Left to right: the dual-watch main screen, the menu
-opened with `key.py MENU`, and entry 30/79 reached with keypresses.
+opened with `key.py MENU` (entry 01/79, Step), and 03/79 after `key.py DOWN DOWN`.
 
 ## What it is for
 
@@ -37,7 +37,7 @@ has no public datasheet, so its driver is the only specification available.
 | Boot to main loop | works, ~5 s |
 | LCD contents | readable via `tools/screenshot.py` |
 | SPI flash, settings, calibration | works |
-| Keypad and menu navigation | works while the radio is awake; power save stops the scan, see below |
+| Keypad and menu navigation | works, including waking from power save |
 | Timing accuracy | deliberately wrong, see [Timing](#timing) |
 | Radio/RF behaviour | not modelled |
 
@@ -46,15 +46,19 @@ a submenu, and typing a menu number jumps straight to that entry. Press duration
 decides short versus held, which the firmware treats as different events -- see
 [Timing](#timing).
 
-The limitation is power save. Around six seconds after boot the firmware enters
-it (`gCurrentFunction` becomes `FUNCTION_POWER_SAVE`) and stops scanning the
-keypad, so keys are ignored from then on. A real radio wakes on a keypress, so
-this is a gap in the machine model rather than firmware behaviour.
+Press duration is the thing to get right. A hold of 400 ms or more is a *long*
+press, and handlers act on it differently: `MAIN_Key_MENU` opens the menu on a
+short release and does nothing on the hold path. If a key seems ignored, shorten
+the press rather than lengthening it. Waking from power save needs nothing
+special -- one 200 ms press both wakes the radio and opens the menu, verified
+after 45 s of idle.
 
-In practice it is not much of an obstacle: keypad activity keeps the radio awake,
-and being in the menu blocks power save entirely. Open the menu within the first
-few seconds of boot and the session stays usable. `AGENTS.md` has the details,
-including two approaches that look like fixes and are not.
+`tools/keypad_test.py` checks all of this against a throwaway QEMU instance. It
+exists because the keypad has one non-obvious trap: the keypad model's `row_out`
+array must stay `volatile`, or GCC at -O2 proves the lines are still NULL and
+deletes every call to `keypad_update_rows()`, so no row is ever driven and
+keypresses silently stop working. Run the test after touching that code;
+`AGENTS.md` has the object-code evidence.
 
 ## Layout
 

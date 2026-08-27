@@ -414,7 +414,21 @@ struct UVK5KeypadState {
 
     bool pressed[KEYPAD_COLS][KEYPAD_ROWS];
     bool col_high[KEYPAD_COLS];
-    qemu_irq row_out[KEYPAD_ROWS];
+    /*
+     * volatile is required, not decorative. qdev_init_gpio_out_named() is
+     * inlinable and only records this array; the lines are filled in later by
+     * qdev_connect_gpio_out_named() from the board, which GCC cannot see. Left
+     * plain, GCC at -O2 proves every element is still NULL, notices that
+     * qemu_set_irq() returns immediately on a NULL irq, and deletes the whole
+     * body of keypad_update_rows() along with all five calls to it -- so no row
+     * line is ever driven and the firmware's keypad scan reads nothing. That
+     * failure is silent and looks exactly like a broken keypad model.
+     *
+     * Verified from the object code: without volatile, keypad_col_changed
+     * compiles to a store and a ret with no call at all; with it, the call is
+     * emitted. See AGENTS.md.
+     */
+    qemu_irq volatile row_out[KEYPAD_ROWS];
 };
 
 /*
@@ -491,7 +505,14 @@ static void keypad_init(Object *obj)
     qdev_init_gpio_in_named(dev, keypad_col_changed, "col", KEYPAD_COLS);
     qdev_init_gpio_in_named(dev, keypad_key_changed, "key",
                             KEYPAD_COLS * KEYPAD_ROWS);
-    qdev_init_gpio_out_named(dev, s->row_out, "row", KEYPAD_ROWS);
+    /*
+     * Cast away volatile for the registration call only. row_out is declared
+     * volatile so GCC cannot conclude the lines stay NULL and delete
+     * keypad_update_rows() -- see the comment on the field. qdev only stores the
+     * pointer here, so dropping the qualifier for this one call is safe and
+     * keeps -Wdiscarded-qualifiers quiet.
+     */
+    qdev_init_gpio_out_named(dev, (qemu_irq *)s->row_out, "row", KEYPAD_ROWS);
 }
 
 /*
