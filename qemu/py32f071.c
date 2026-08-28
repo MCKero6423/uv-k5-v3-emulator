@@ -341,10 +341,11 @@ static void py32_gpio_reset(DeviceState *dev)
      * active low, so a floating pin has to read as "not pressed".
      *
      * Exception: PB9 is the bidirectional data line of the software-driven
-     * three-wire bus to the BK4819 transceiver. Idling it high makes every
-     * register read return 0xFFFF, and RADIO_SetupRegisters then spins forever
-     * waiting for bit 0 of REG_0C to clear. Idle it low until that bus has a
-     * device model, so reads come back as zero and the wait terminates.
+     * three-wire bus to the BK4819 transceiver, which now has a device model
+     * driving it (see TYPE_UVK5_BK4819). Idle it low anyway, for the window
+     * between reset and the bus being wired up: a high idle makes reads return
+     * 0xFFFF, and RADIO_SetupRegisters spins on bit 0 of REG_0C with no timeout,
+     * so it would hang outright rather than degrade.
      */
     s->idr = 0xffff;
     if (s->port_name && s->port_name[0] == 'b') {

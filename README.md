@@ -41,8 +41,9 @@ has no public datasheet, so its driver is the only specification available.
 | Keypad and menu navigation | works, including waking from power save |
 | Serial output (firmware log) | works, appears in the web UI log |
 | Serial input, CPS programming protocol | works, `-serial` any chardev |
+| BK4819 register interface | works, RSSI and status readable |
 | Timing accuracy | deliberately wrong, see [Timing](#timing) |
-| Radio/RF behaviour | not modelled |
+| Analogue RF behaviour | **not modelled and never will be**, see [AGENTS.md](AGENTS.md#the-bk4819-and-where-modelling-it-stops) |
 
 A short `tools/key.py MENU` opens the menu, UP/DOWN move through it, MENU enters
 a submenu, and typing a menu number jumps straight to that entry. Press duration
@@ -78,6 +79,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_flash_persist.py  flash writes survive a power cycle
       test_freq_entry.py     a typed frequency takes effect and persists
       test_serial_rx.py      the firmware answers programming commands
+      test_bk4819.py         BK4819 register interface, RSSI not stuck at zero
       lib_kill_emulator.sh   cleanup that only ever kills emulators
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
@@ -121,6 +123,7 @@ Then check the build actually works, which takes about a minute:
     python3 tools/test_flash_persist.py
     python3 tools/test_freq_entry.py
     python3 tools/test_serial_rx.py
+    python3 tools/test_bk4819.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean

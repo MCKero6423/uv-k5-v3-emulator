@@ -437,17 +437,37 @@ Note the ELF at `uvk5-sat/build/CW/nr7y.cw.elf` carries no DWARF, so gdb reports
 `'gEeprom' has unknown type`. Scalars work if you cast through their address
 (`*(unsigned short*)&gDebounceCounter`); struct fields need manual offsets.
 
-## What this cannot do
+## The BK4819, and where modelling it stops
 
-It reproduces what the firmware *commanded* — frequency, power step, carrier
-keying in time. It does not reproduce the analogue result: keying envelopes,
-spurious emissions, sensitivity.
+The register interface is modelled (`TYPE_UVK5_BK4819`): the bit-banged three-wire
+bus is decoded, registers read back what the firmware wrote, and the ones it reads
+without writing return plausible values. Wiring is CS on PF9, SCL PB8, SDA PB9 with
+both directions connected. `tools/test_bk4819.py` inspects the register file over QOM.
 
-That is not a gap to close later. The BK4819/BK4829 transceiver has no public
-datasheet, so its driver is the only specification available, and a driver tells
-you which registers were written, never what left the antenna. Those questions
-need a real radio and a spectrum analyser. Do not let anyone conclude otherwise
-from a passing emulator test.
+This is what it fixed: RSSI used to read hard zero at 18 call sites — -160 dBm — so
+the S-meter showed empty and squelch and scan logic evaluated a dead band. The main
+screen now comes up on 400 MHz rather than the 18 MHz floor, because band setup is no
+longer reading zeros.
+
+Two constraints are not negotiable, both from untimed spin loops in the firmware:
+
+- **REG_0C bit 0 must stay clear.** `app/app.c:910` and `:1417` are
+  `while (BK4819_ReadRegister(BK4819_REG_0C) & 1u)` with no timeout at all. A stuck
+  bit hangs the guest; it does not degrade.
+- **A soft reset must re-seed the measurement registers.** `REG_00` bit 15, which
+  `BK4819_Init` issues first, would otherwise leave them zero — real hardware keeps
+  measuring. Not hypothetical: the first test run decoded 48 registers correctly and
+  still reported RSSI as 0 for precisely this reason.
+
+**Where it stops.** This models the register interface, not the radio. It reproduces
+what the firmware *commanded* — frequency, power step, carrier keying in time — never
+the analogue result: keying envelopes, spurious emissions, sensitivity.
+
+That is not a gap to close later. The chip has no public datasheet, so its driver is
+the only specification available, and a driver tells you which registers were
+written, never what left the antenna. Those questions need a real radio and a
+spectrum analyser. Do not let anyone conclude otherwise from a passing emulator test,
+including the one added here.
 
 Timing is also deliberately wrong — see the SysTick section in README.md. Fine
 for menus and control flow; useless for signal timing.
