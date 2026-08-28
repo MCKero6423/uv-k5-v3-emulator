@@ -28,9 +28,12 @@
 #include "hw/arm/armv7m.h"
 #include "hw/boards.h"
 #include "hw/qdev-properties.h"
+/* Serial receive: USART1 takes a chardev so a host tool can drive the firmware. */
+#include "hw/qdev-properties-system.h"
+#include "chardev/char-fe.h"
+#include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
 #include "exec/address-spaces.h"
-#include "sysemu/sysemu.h"
 #include "qom/object.h"
 
 /* ---------------------------------------------------------------- memory map */
@@ -820,7 +823,18 @@ OBJECT_DECLARE_SIMPLE_TYPE(PY32DmaState, PY32_DMA)
 
 typedef struct {
     uint32_t ccr, cndtr, cpar, cmar;
+    /*
+     * The length the guest programmed, kept separately because cndtr counts down.
+     * Needed to derive how far into the buffer a transfer has got, and to reload
+     * the count in circular mode.
+     */
+    uint32_t total;
 } PY32DmaChannel;
+
+/* Defined further down; DMA drains its receive queue. */
+typedef struct PY32StubState PY32StubState;
+static bool py32_stub_rx_empty(PY32StubState *s);
+static bool py32_stub_rx_pop(PY32StubState *s, uint8_t *out);
 
 struct PY32DmaState {
     SysBusDevice parent_obj;
@@ -835,6 +849,12 @@ struct PY32DmaState {
 
     /* Set by the SoC: lets the DMA clock bytes through an SPI controller. */
     PY32SpiState *spi[2];
+
+    /*
+     * Set by the SoC. USART1's receive queue is drained from here because the
+     * firmware's UART driver never reads DR -- it watches the DMA count instead.
+     */
+    PY32StubState *usart1;
 
     /*
      * The address space DMA transfers move bytes through.
@@ -975,6 +995,73 @@ static void py32_dma_kick(void *dma, PY32SpiState *spi)
     py32_dma_run_for_spi((PY32DmaState *)dma, spi);
 }
 
+/*
+ * Move queued USART bytes into the guest buffer, one at a time, decrementing the
+ * channel's remaining count.
+ *
+ * The count is the whole point. App/driver/uart.c configures a circular
+ * peripheral-to-memory channel and never reads DR; it locates new data with
+ *
+ *     write_ptr = sizeof(UART_DMA_Buffer) - LL_DMA_GetDataLength(...)
+ *
+ * so a model that leaves CNDTR at its initial value reports an empty buffer
+ * forever, no matter how many bytes arrived. Serial receive was dead for exactly
+ * that reason, and with it the whole UV-K5 programming protocol.
+ *
+ * Circular mode reloads the count and wraps the address on completion rather than
+ * stopping, which is what makes the firmware's pointer arithmetic work across the
+ * end of the buffer.
+ */
+static void py32_dma_service_usart_rx(PY32DmaState *s)
+{
+    AddressSpace *as = s->as;
+
+    if (!as || !s->usart1) {
+        return;
+    }
+
+    for (int ch = 0; ch < PY32_DMA_CHANNELS; ch++) {
+        PY32DmaChannel *c = &s->ch[ch];
+
+        if (!(c->ccr & DMA_CCR_EN) || (c->ccr & DMA_CCR_DIR)) {
+            continue;                 /* disabled, or memory-to-peripheral */
+        }
+        if ((c->cpar & ~0x3ffu) != PY32_USART1_BASE) {
+            continue;
+        }
+        if (c->total == 0) {
+            continue;                 /* never configured with a length */
+        }
+
+        while (!py32_stub_rx_empty(s->usart1)) {
+            uint8_t byte;
+            if (!py32_stub_rx_pop(s->usart1, &byte)) {
+                break;
+            }
+
+            const uint32_t done = c->total - c->cndtr;
+            const uint32_t dest = c->cmar + ((c->ccr & DMA_CCR_MINC) ? done : 0);
+            address_space_write(as, dest, MEMTXATTRS_UNSPECIFIED, &byte, 1);
+
+            if (c->cndtr > 0) {
+                c->cndtr--;
+            }
+
+            if (c->cndtr == 0) {
+                if (c->ccr & DMA_CCR_CIRC) {
+                    c->cndtr = c->total;      /* wrap, keep running */
+                } else {
+                    c->ccr &= ~DMA_CCR_EN;
+                    break;
+                }
+            }
+        }
+
+        s->isr |= DMA_FLAG_GIF(ch);
+        py32_dma_update_irq(s);
+    }
+}
+
 static uint64_t py32_dma_read(void *opaque, hwaddr addr, unsigned size)
 {
     PY32DmaState *s = opaque;
@@ -991,7 +1078,16 @@ static uint64_t py32_dma_read(void *opaque, hwaddr addr, unsigned size)
         if (ch < PY32_DMA_CHANNELS) {
             switch (reg) {
             case DMA_CCR:   return s->ch[ch].ccr;
-            case DMA_CNDTR: return s->ch[ch].cndtr;
+            case DMA_CNDTR:
+                /*
+                 * Deliver any pending serial bytes before answering. This read is
+                 * precisely how App/driver/uart.c discovers new data -- it computes
+                 * a write pointer from the remaining count -- so servicing here
+                 * needs no timer and cannot deliver bytes the guest has not asked
+                 * about yet.
+                 */
+                py32_dma_service_usart_rx(s);
+                return s->ch[ch].cndtr;
             case DMA_CPAR:  return s->ch[ch].cpar;
             case DMA_CMAR:  return s->ch[ch].cmar;
             default: break;
@@ -1021,7 +1117,10 @@ static void py32_dma_write(void *opaque, hwaddr addr, uint64_t value, unsigned s
     }
 
     switch (reg) {
-    case DMA_CNDTR: s->ch[ch].cndtr = value; break;
+    case DMA_CNDTR:
+        s->ch[ch].cndtr = value;
+        s->ch[ch].total = value;      /* remember it; cndtr counts down */
+        break;
     case DMA_CPAR:  s->ch[ch].cpar = value;  break;
     case DMA_CMAR:  s->ch[ch].cmar = value;  break;
     case DMA_CCR: {
@@ -1479,11 +1578,61 @@ struct PY32StubState {
     char        *stub_name;
     uint32_t     size;
     uint32_t     regs[0x100];
+
+    /*
+     * Receive path, USART1 only.
+     *
+     * A chardev supplies bytes; DR hands them to the guest. The DMA model drains
+     * this queue on behalf of the circular receive channel, because
+     * App/driver/uart.c never reads DR directly -- it derives a write pointer from
+     * the channel's remaining count.
+     */
+    CharBackend  chr;
+    uint8_t      rx_fifo[256];
+    unsigned     rx_head, rx_tail;
 };
 
-/* USART_SR transmit flags, from the vendor header: TXE is bit 7, TC bit 6. */
+/* USART_SR flags, from the vendor header. */
+#define PY32_USART_SR_RXNE (1u << 5)
 #define PY32_USART_SR_TC   (1u << 6)
 #define PY32_USART_SR_TXE  (1u << 7)
+
+static bool py32_stub_rx_empty(PY32StubState *s)
+{
+    return s->rx_head == s->rx_tail;
+}
+
+/* Pull one received byte, or return false when nothing is queued. */
+static bool py32_stub_rx_pop(PY32StubState *s, uint8_t *out)
+{
+    if (py32_stub_rx_empty(s)) {
+        return false;
+    }
+    *out = s->rx_fifo[s->rx_tail];
+    s->rx_tail = (s->rx_tail + 1) % sizeof(s->rx_fifo);
+    return true;
+}
+
+static int py32_stub_can_receive(void *opaque)
+{
+    PY32StubState *s = opaque;
+    const unsigned used = (s->rx_head - s->rx_tail) % sizeof(s->rx_fifo);
+    return sizeof(s->rx_fifo) - 1 - used;
+}
+
+static void py32_stub_receive(void *opaque, const uint8_t *buf, int size)
+{
+    PY32StubState *s = opaque;
+
+    for (int i = 0; i < size; i++) {
+        const unsigned next = (s->rx_head + 1) % sizeof(s->rx_fifo);
+        if (next == s->rx_tail) {
+            break;                    /* full; drop rather than overwrite */
+        }
+        s->rx_fifo[s->rx_head] = buf[i];
+        s->rx_head = next;
+    }
+}
 
 static uint64_t py32_stub_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -1504,6 +1653,19 @@ static uint64_t py32_stub_read(void *opaque, hwaddr addr, unsigned size)
      */
     if (addr == 0x00 && s->stub_name && !strcmp(s->stub_name, "usart1")) {
         value |= PY32_USART_SR_TXE | PY32_USART_SR_TC;
+        /* RXNE so a firmware that polls instead of using DMA also works. */
+        if (!py32_stub_rx_empty(s)) {
+            value |= PY32_USART_SR_RXNE;
+        }
+    }
+
+    /* Reading DR consumes a received byte, as on hardware. */
+    if (addr == 0x04 && s->stub_name && !strcmp(s->stub_name, "usart1")) {
+        uint8_t byte;
+        if (py32_stub_rx_pop(s, &byte)) {
+            return byte;
+        }
+        return 0;
     }
 
     qemu_log_mask(LOG_UNIMP, "py32-%s: read 0x%03" HWADDR_PRIx " -> 0x%08x\n",
@@ -1559,7 +1721,20 @@ static void py32_stub_write(void *opaque, hwaddr addr, uint64_t value, unsigned 
         s->regs[idx] = value;
     }
     if (addr == 0x04 && s->stub_name && !strcmp(s->stub_name, "usart1")) {
-        py32_stub_serial_byte((char)(value & 0xff));
+        const uint8_t byte = value & 0xff;
+
+        /* Human-readable copy on stderr, which is what the web UI log reads. */
+        py32_stub_serial_byte((char)byte);
+
+        /*
+         * And the raw byte to the chardev, if one is attached. Without this the
+         * transmit side is invisible to anything on the other end of the port: a
+         * host tool sends a command, the firmware answers, and the answer only ever
+         * reaches stderr -- which looks exactly like the firmware ignoring it.
+         */
+        if (qemu_chr_fe_backend_connected(&s->chr)) {
+            qemu_chr_fe_write_all(&s->chr, &byte, 1);
+        }
     }
     qemu_log_mask(LOG_UNIMP, "py32-%s: write 0x%03" HWADDR_PRIx " = 0x%08" PRIx64 "\n",
                   s->stub_name ?: "stub", addr, value);
@@ -1581,11 +1756,22 @@ static void py32_stub_realize(DeviceState *dev, Error **errp)
                           s->stub_name ?: TYPE_PY32_STUB,
                           s->size ? s->size : 0x400);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+
+    /*
+     * Only USART1 takes a chardev: it is the firmware's console and the port the
+     * UV-K5 programming protocol speaks over. Harmless when unset -- without a
+     * backend the receive queue simply stays empty, which is the old behaviour.
+     */
+    if (s->stub_name && !strcmp(s->stub_name, "usart1")) {
+        qemu_chr_fe_set_handlers(&s->chr, py32_stub_can_receive,
+                                 py32_stub_receive, NULL, NULL, s, NULL, true);
+    }
 }
 
 static Property py32_stub_properties[] = {
     DEFINE_PROP_STRING("stub-name", PY32StubState, stub_name),
     DEFINE_PROP_UINT32("size", PY32StubState, size, 0x400),
+    DEFINE_PROP_CHR("chardev", PY32StubState, chr),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -1797,11 +1983,30 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
     for (int i = 0; i < PY32_NUM_STUB; i++) {
         qdev_prop_set_string(DEVICE(&s->stub[i]), "stub-name", py32_stubs[i].name);
         qdev_prop_set_uint32(DEVICE(&s->stub[i]), "size", py32_stubs[i].size);
+
+        /*
+         * Give USART1 a chardev so something can talk *to* the firmware. This is
+         * the port the UV-K5 programming protocol runs over (App/app/uart.c:
+         * 0x0514 handshake, 0x051B/0x051D EEPROM read and write, 0x05DD reset).
+         * Defaults to "serial0", so -serial on the command line just works.
+         */
+        if (!strcmp(py32_stubs[i].name, "usart1")) {
+            Chardev *chr = serial_hd(0);
+            if (chr) {
+                qdev_prop_set_chr(DEVICE(&s->stub[i]), "chardev", chr);
+            }
+        }
+
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->stub[i]), errp)) {
             return;
         }
         memory_region_add_subregion(&s->container, py32_stubs[i].base,
                                     sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->stub[i]), 0));
+
+        /* DMA drains USART1's receive queue; see py32_dma_service_usart_rx. */
+        if (!strcmp(py32_stubs[i].name, "usart1")) {
+            s->dma.usart1 = &s->stub[i];
+        }
     }
 
     /*
