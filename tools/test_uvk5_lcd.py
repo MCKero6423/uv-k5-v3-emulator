@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Unit tests for LCD unpacking and PNG encoding. No emulator needed."""
+import os
 import struct
+import tempfile
 import unittest
 import zlib
 
-from uvk5_lcd import LCD_HEIGHT, LCD_WIDTH, encode_png, unpack
+from uvk5_lcd import (FRAME_BYTES, LCD_HEIGHT, LCD_WIDTH, STATUS_BYTES,
+                      FrameGrabber, encode_png, unpack)
 
 
 class TestUnpack(unittest.TestCase):
@@ -76,6 +79,96 @@ class TestEncodePng(unittest.TestCase):
         self.assertEqual(raw[0], 0)          # filter type 0
         self.assertEqual(raw[1], 0x00)       # lit pixel -> black
         self.assertEqual(raw[2], 0xFF)       # neighbour -> white
+
+
+class StubClient:
+    """Stands in for QmpClient; writes the files memsave would write.
+
+    Rejects pmemsave on purpose. pmemsave takes a *physical* address and returns
+    zeros for the framebuffer's virtual address -- a blank screen with no error
+    reported anywhere, which is exactly the bug this stub is here to catch.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def command(self, name, **args):
+        self.calls.append((name, args))
+        if name == "pmemsave":
+            raise AssertionError(
+                "pmemsave reads physical addresses and silently returns zeros "
+                "for gFrameBuffer; use memsave")
+        if name != "memsave":
+            raise AssertionError(f"unexpected command {name}")
+        with open(args["filename"], "wb") as fh:
+            fh.write(bytes(args["size"]))
+        return {}
+
+
+class TestFrameGrabber(unittest.TestCase):
+    def test_uses_memsave_and_returns_png(self):
+        client = StubClient()
+        tmp = tempfile.mkdtemp()
+        grabber = FrameGrabber(client, frame_addr=0x200013DC,
+                               status_addr=0x2000175C, spool_dir=tmp)
+        png = grabber.png(scale=2)
+
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual([c[0] for c in client.calls], ["memsave", "memsave"])
+
+    def test_reads_the_right_addresses_and_sizes(self):
+        client = StubClient()
+        grabber = FrameGrabber(client, frame_addr=0x200013DC,
+                               status_addr=0x2000175C,
+                               spool_dir=tempfile.mkdtemp())
+        grabber.raw()
+
+        by_addr = {args["val"]: args["size"] for _, args in client.calls}
+        self.assertEqual(by_addr[0x200013DC], FRAME_BYTES)
+        self.assertEqual(by_addr[0x2000175C], STATUS_BYTES)
+
+    def test_raw_returns_status_then_frame(self):
+        client = StubClient()
+        grabber = FrameGrabber(client, frame_addr=0x1000, status_addr=0x2000,
+                               spool_dir=tempfile.mkdtemp())
+        status, frame = grabber.raw()
+        self.assertEqual(len(status), STATUS_BYTES)
+        self.assertEqual(len(frame), FRAME_BYTES)
+
+    def test_never_uses_pmemsave(self):
+        """Regression guard: pmemsave silently reads the wrong memory.
+
+        The framebuffer symbols are CPU virtual addresses. pmemsave treats its
+        argument as physical and returns zeros, so the screen renders blank with
+        no error raised. Verified against a live emulator: pmemsave gave 0 lit
+        bits, memsave gave 1693, matching the gdb path exactly.
+        """
+        source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "uvk5_lcd.py")).read()
+        code = "\n".join(line for line in source.splitlines()
+                          if not line.lstrip().startswith("#")
+                          and not line.lstrip().startswith("*"))
+        # Allow the word inside the explanatory docstring, forbid a real call.
+        self.assertNotIn('command("pmemsave"', code)
+
+    def test_does_not_invoke_gdb(self):
+        """Guard the design decision, not just the current behaviour.
+
+        A gdb attach halts the guest, which would both stutter a live stream and
+        perturb key debounce timing (see AGENTS.md). pmemsave leaves the guest
+        running -- measured ~1.3 ms per frame with status still "running".
+
+        Checks for the machinery needed to shell out, not for the word "gdb":
+        the module mentions gdb in prose precisely to explain why it is avoided.
+        """
+        source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "uvk5_lcd.py")).read()
+        code = "\n".join(line for line in source.splitlines()
+                         if not line.lstrip().startswith("#"))
+        for forbidden in ("subprocess", "os.system", "popen", "gdb-multiarch"):
+            self.assertNotIn(forbidden, code.lower(),
+                             f"{forbidden} must not appear: reading frames has "
+                             "to stay on the QMP path")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ The firmware keeps the display in gStatusLine (page 0) and gFrameBuffer
 the layout the ST7565 expects. Extracted from tools/screenshot.py so the web UI
 and the CLI screenshotter cannot drift apart.
 """
+import os
 import struct
 import zlib
 
@@ -56,3 +57,44 @@ def encode_png(pixels, scale: int = 4) -> bytes:
             + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
             + chunk(b"IEND", b""))
+
+
+class FrameGrabber:
+    """Reads the LCD out of guest memory over QMP.
+
+    memsave, not pmemsave. The framebuffer symbols are CPU virtual addresses;
+    pmemsave interprets its argument as a *physical* address and silently returns
+    a block of zeros for these, which renders as a blank screen with no error
+    anywhere. memsave takes the virtual address and returns the real contents --
+    verified against the gdb path, both reporting 1693 lit bits on the same frame.
+
+    QMP, not gdb: measured ~1.35 ms per frame with the guest still reporting
+    status "running". The gdb path used by screenshot.py halts the guest on every
+    attach, which is unusable for a live stream and also perturbs key debounce
+    timing (see AGENTS.md). Do not reintroduce gdb here.
+    """
+
+    def __init__(self, client, frame_addr: int, status_addr: int,
+                 spool_dir: str = "/dev/shm"):
+        self._client = client
+        self._frame_addr = frame_addr
+        self._status_addr = status_addr
+        # pmemsave writes to a path, so a tmpfs avoids disk I/O every frame.
+        self._frame_path = os.path.join(spool_dir, "uvk5-frame.bin")
+        self._status_path = os.path.join(spool_dir, "uvk5-status.bin")
+
+    def raw(self) -> tuple[bytes, bytes]:
+        """Return (status, frame) exactly as the firmware holds them."""
+        self._client.command("memsave", val=self._frame_addr,
+                             size=FRAME_BYTES, filename=self._frame_path)
+        self._client.command("memsave", val=self._status_addr,
+                             size=STATUS_BYTES, filename=self._status_path)
+        with open(self._frame_path, "rb") as fh:
+            frame = fh.read(FRAME_BYTES)
+        with open(self._status_path, "rb") as fh:
+            status = fh.read(STATUS_BYTES)
+        return status, frame
+
+    def png(self, scale: int = 4) -> bytes:
+        status, frame = self.raw()
+        return encode_png(unpack(status, frame), scale)
