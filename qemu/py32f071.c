@@ -623,6 +623,14 @@ struct PY32SpiState {
 
     PY32SpiXferFn xfer;
     void         *xfer_opaque;
+
+    /*
+     * Set by the DMA model so SPI can kick armed channels when the guest asserts
+     * a DMA request. Without this the request is invisible to DMA and the
+     * transfer has to be started at arm time, which is too early.
+     */
+    void (*dma_kick)(void *dma, PY32SpiState *spi);
+    void  *dma;
 };
 
 #define SPI_CR1  0x00
@@ -633,6 +641,10 @@ struct PY32SpiState {
 #define SPI_SR_RXNE (1u << 0)
 #define SPI_SR_TXE  (1u << 1)
 #define SPI_SR_BSY  (1u << 7)
+
+#define SPI_CR1_SPE     (1u << 6)   /* SPI enable */
+#define SPI_CR2_RXDMAEN (1u << 0)   /* RX DMA request enable */
+#define SPI_CR2_TXDMAEN (1u << 1)   /* TX DMA request enable */
 
 void py32_spi_set_xfer(PY32SpiState *s, PY32SpiXferFn fn, void *opaque);
 
@@ -672,8 +684,31 @@ static void py32_spi_write(void *opaque, hwaddr addr, uint64_t value, unsigned s
     PY32SpiState *s = opaque;
 
     switch (addr) {
-    case SPI_CR1: s->cr1 = value; break;
-    case SPI_CR2: s->cr2 = value; break;
+    case SPI_CR1:
+        s->cr1 = value;
+        /*
+         * SPE can be the last thing enabled. The flash driver's read path arms both
+         * channels, sets RXDMAEN, enables SPI, then sets TXDMAEN -- but the write
+         * path enables SPI last, so both orders have to work.
+         */
+        if ((value & SPI_CR1_SPE) && (s->cr2 & (SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN))
+            && s->dma_kick) {
+            s->dma_kick(s->dma, s);
+        }
+        break;
+    case SPI_CR2:
+        s->cr2 = value;
+        /*
+         * A DMA request is what actually starts the transfer on hardware. Kick the
+         * armed channels here rather than when they were enabled: at arm time the
+         * read command has not been clocked out yet, so the reply would be read
+         * before the device had anything to say.
+         */
+        if ((value & (SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN))
+            && (s->cr1 & SPI_CR1_SPE) && s->dma_kick) {
+            s->dma_kick(s->dma, s);
+        }
+        break;
     case SPI_SR:
         /* Flags are mostly hardware-driven; keep TXE asserted. */
         s->sr = (value & ~SPI_SR_TXE) | SPI_SR_TXE;
@@ -833,50 +868,84 @@ static PY32SpiState *py32_dma_spi_for(PY32DmaState *s, uint32_t paddr)
 }
 
 /*
- * Runs a channel to completion. Transmit channels feed bytes to the device;
- * receive channels store what it returns. When both directions are armed the
- * transmit side has usually been enabled first, and the flash driver arms RX
- * before TX, so a receive channel drives the clock itself -- otherwise nothing
- * would ever be shifted in.
+ * Run the armed channels for one SPI peripheral.
+ *
+ * SPI is inherently duplex: every clocked byte simultaneously sends one byte and
+ * receives one. The firmware exploits this, arming a memory-to-peripheral channel
+ * that feeds dummy bytes and a peripheral-to-memory channel that collects the
+ * reply, both over the same transfer.
+ *
+ * So the two channels have to be stepped together, one byte at a time. Running
+ * them one after another -- as this did when each channel started on its own
+ * enable -- means the TX channel clocks the entire transfer out before the RX
+ * channel ever looks at the bus, and RX collects nothing.
  */
-static void py32_dma_run(PY32DmaState *s, int ch)
+static void py32_dma_run_for_spi(PY32DmaState *s, PY32SpiState *spi)
 {
-    PY32DmaChannel *c = &s->ch[ch];
-    PY32SpiState *spi = py32_dma_spi_for(s, c->cpar);
+    AddressSpace *as = &address_space_memory;
+    int tx = -1, rx = -1;
 
-    if (!spi || c->cndtr == 0) {
-        /* Nothing attached, or a zero-length transfer: report completion so the
-         * guest does not wait forever. */
-        s->isr |= DMA_FLAG_TCIF(ch) | DMA_FLAG_GIF(ch);
-        c->cndtr = 0;
-        py32_dma_update_irq(s);
+    for (int ch = 0; ch < PY32_DMA_CHANNELS; ch++) {
+        PY32DmaChannel *c = &s->ch[ch];
+        if (!(c->ccr & DMA_CCR_EN) || c->cndtr == 0) {
+            continue;
+        }
+        if (py32_dma_spi_for(s, c->cpar) != spi) {
+            continue;
+        }
+        if (c->ccr & DMA_CCR_DIR) {
+            tx = ch;
+        } else {
+            rx = ch;
+        }
+    }
+
+    if (tx < 0 && rx < 0) {
         return;
     }
 
-    const bool from_memory = (c->ccr & DMA_CCR_DIR) != 0;
-    const bool minc = (c->ccr & DMA_CCR_MINC) != 0;
-    uint32_t maddr = c->cmar;
-    AddressSpace *as = &address_space_memory;
+    /* Length is whichever side is armed; when both are, they match. */
+    uint32_t count = tx >= 0 ? s->ch[tx].cndtr : s->ch[rx].cndtr;
+    uint32_t tx_addr = tx >= 0 ? s->ch[tx].cmar : 0;
+    uint32_t rx_addr = rx >= 0 ? s->ch[rx].cmar : 0;
+    const bool tx_inc = tx >= 0 && (s->ch[tx].ccr & DMA_CCR_MINC);
+    const bool rx_inc = rx >= 0 && (s->ch[rx].ccr & DMA_CCR_MINC);
 
-    while (c->cndtr > 0) {
-        uint8_t byte = 0xff;
+    while (count > 0) {
+        uint8_t out = 0xff;
 
-        if (from_memory) {
-            address_space_read(as, maddr, MEMTXATTRS_UNSPECIFIED, &byte, 1);
-            (void)py32_spi_xfer_byte(spi, byte);
-        } else {
-            byte = py32_spi_xfer_byte(spi, 0xff);
-            address_space_write(as, maddr, MEMTXATTRS_UNSPECIFIED, &byte, 1);
+        if (tx >= 0) {
+            address_space_read(as, tx_addr, MEMTXATTRS_UNSPECIFIED, &out, 1);
         }
 
-        if (minc) {
-            maddr++;
+        const uint8_t in = py32_spi_xfer_byte(spi, out);
+
+        if (rx >= 0) {
+            address_space_write(as, rx_addr, MEMTXATTRS_UNSPECIFIED, &in, 1);
         }
-        c->cndtr--;
+
+        if (tx_inc) {
+            tx_addr++;
+        }
+        if (rx_inc) {
+            rx_addr++;
+        }
+        count--;
     }
 
-    s->isr |= DMA_FLAG_TCIF(ch) | DMA_FLAG_GIF(ch);
+    for (int ch = 0; ch < PY32_DMA_CHANNELS; ch++) {
+        if (ch == tx || ch == rx) {
+            s->ch[ch].cndtr = 0;
+            s->isr |= DMA_FLAG_TCIF(ch) | DMA_FLAG_GIF(ch);
+        }
+    }
     py32_dma_update_irq(s);
+}
+
+/* Thin adaptor so SPI can call into DMA without knowing its type. */
+static void py32_dma_kick(void *dma, PY32SpiState *spi)
+{
+    py32_dma_run_for_spi((PY32DmaState *)dma, spi);
 }
 
 static uint64_t py32_dma_read(void *opaque, hwaddr addr, unsigned size)
@@ -929,12 +998,21 @@ static void py32_dma_write(void *opaque, hwaddr addr, uint64_t value, unsigned s
     case DMA_CPAR:  s->ch[ch].cpar = value;  break;
     case DMA_CMAR:  s->ch[ch].cmar = value;  break;
     case DMA_CCR: {
-        const bool was_enabled = (s->ch[ch].ccr & DMA_CCR_EN) != 0;
-        s->ch[ch].ccr = value;
-        if (!was_enabled && (value & DMA_CCR_EN)) {
-            py32_dma_run(s, ch);
-        }
-        break;
+      s->ch[ch].ccr = value;
+      /*
+       * Enabling a channel only arms it. On real hardware the transfer starts
+       * when the peripheral raises its DMA request, which for SPI means
+       * SPI_CR2's TXDMAEN. Running it here instead broke duplex reads: the
+       * firmware's SPI_ReadBuf arms RX then TX and only then enables SPI, so a
+       * transfer that fired at arm time clocked the bus before the read command
+       * had been sent, and the destination buffer came back as zeros.
+       *
+       * That is what wiped the VFO frequency area. PY25Q16_WriteBuffer reads the
+       * whole 4 KB sector into SectorCache, patches it, and writes it back; the
+       * read returned zeros, so the write-back filled the sector with zeros --
+       * including the per-band frequencies at 0x9000.
+       */
+      break;
     }
     default:
         break;
@@ -1652,6 +1730,12 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
      */
     s->dma.spi[0] = &s->spi[0];
     s->dma.spi[1] = &s->spi[1];
+
+    /* And the reverse link, so a DMA request from SPI can start the transfer. */
+    for (int i = 0; i < 2; i++) {
+        s->spi[i].dma = &s->dma;
+        s->spi[i].dma_kick = py32_dma_kick;
+    }
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->dma), errp)) {
         return;
     }

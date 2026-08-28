@@ -149,7 +149,19 @@ def main():
 
     workdir = tempfile.mkdtemp(prefix="uvk5-persist-")
     image = os.path.join(workdir, "flash.img")
-    shutil.copy(SOURCE_IMAGE, image)
+
+    # Start from the pristine image, not assets/flash.img. The live image may have
+    # been written by an earlier session, and then a boot has nothing left to save
+    # -- which shows up as "the image is byte-identical", a confusing failure that
+    # looks like persistence is broken when it is the fixture that is dirty.
+    pristine_gz = os.path.join(os.path.dirname(SOURCE_IMAGE),
+                               "pristine", "flash-pristine.img.gz")
+    if os.path.exists(pristine_gz):
+        import gzip
+        with gzip.open(pristine_gz, "rb") as src, open(image, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    else:
+        shutil.copy(SOURCE_IMAGE, image)
     failures = []
 
     try:
