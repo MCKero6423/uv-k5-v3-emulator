@@ -63,6 +63,24 @@ session:
 
     python3 tools/keypad_test.py
 
+There is also a browser UI, which is usually the quickest way to poke at the
+firmware by hand:
+
+    python3 tools/webui.py --frame-addr 0x200013DC \
+        --status-addr 0x2000175C     # then open http://127.0.0.1:8080/
+
+Two things about it that matter when working on this repo:
+
+- **It holds the QMP socket for its lifetime**, so `key.py` cannot run at the same
+  time. The socket accepts a single client.
+- **It reads frames with QMP `memsave`, deliberately.** Not `pmemsave`, which
+  takes a *physical* address and silently returns zeros for `gFrameBuffer` --
+  a blank screen with no error. And not gdb, which halts the guest on every
+  attach: that stutters the stream and perturbs key debounce timing.
+
+Its tests: `tools/test_uvk5_*.py` and `tools/test_webui.py` need no emulator,
+`tools/test_webui_e2e.py` boots its own.
+
 ## Things that already went wrong
 
 **GDB breakpoints halt the guest.** A key held across a breakpoint session is
@@ -97,6 +115,14 @@ short release did nothing. See the keypad section below; `key.py` now holds 200 
 reported `IDR=0x0000` for several rounds because its regex did not match gdb's
 output format at all. The register was fine; the reader was broken. Cross-check
 with `tools/gpiob_dump.sh`, which uses a different path.
+
+**QMP `pmemsave` is physical, `memsave` is virtual.** The framebuffer symbols are
+CPU virtual addresses, so `pmemsave` on `gFrameBuffer` returns a block of zeros
+and reports success -- a blank screen with nothing logged anywhere. The web UI was
+built on `pmemsave` first because a timing benchmark said it was fast; the
+benchmark never checked the *contents*. Measure the thing you actually care
+about: the bug surfaced only when a rendered frame came back with 0 lit pixels
+where the gdb path reported 1693.
 
 ## The keypad: two real bugs, both fixed
 

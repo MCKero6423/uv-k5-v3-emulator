@@ -13,3 +13,7 @@ build/
 
 # Plan documents from the plan skill: local working notes.
 .hermes/
+
+# Python bytecode from the tools tests.
+__pycache__/
+*.pyc

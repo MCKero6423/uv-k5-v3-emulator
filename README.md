@@ -70,6 +70,10 @@ keypresses silently stop working. Run the test after touching that code;
     docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
       keypad_test.py         keypad regression test, boots its own instance
+      webui.py               web remote control: live LCD plus clickable keypad
+      uvk5_qmp.py            QMP client
+      uvk5_lcd.py            framebuffer decode, PNG encode, frame grabber
+      uvk5_keys.py           key names the keypad model accepts
     harness/, stubs/, shim/, tests/   host build of the CW timing chain (stage A)
 
 ## Building
@@ -108,6 +112,12 @@ This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean
 build is not evidence that keypresses work.
 
+The rest of the tests:
+
+    cd tools && python3 -m unittest discover -p 'test_uvk5*.py' -v  # fast, no emulator
+    cd tools && python3 -m unittest test_webui -v                   # fast, no emulator
+    python3 tools/test_webui_e2e.py                                # boots its own emulator
+
 ## Running
 
     python3 tools/make_flash.py     # once, builds assets/flash.img
@@ -127,6 +137,55 @@ Screenshots need the addresses of `gFrameBuffer` and `gStatusLine`, which move
 between builds. Find them with:
 
     arm-none-eabi-nm firmware.elf | grep -E 'gFrameBuffer|gStatusLine'
+
+## Web remote control
+
+`tools/webui.py` serves the LCD and a clickable keypad, so the radio can be
+driven from a browser instead of `key.py` plus `screenshot.py`.
+
+    tools/run.sh                                   # emulator first
+    python3 tools/webui.py --frame-addr 0x200013DC \
+        --status-addr 0x2000175C                   # then the server
+
+Open <http://127.0.0.1:8080/>. The keypad is laid out like the radio, with the
+side keys alongside. Arrow keys, Enter (MENU), Esc (EXIT) and the digits are
+bound to the physical keys.
+
+Press duration comes from how long you actually hold the button, because the
+firmware treats anything past 400 ms as a *held* key and dispatches it as a
+different event. The browser sends the two edges separately rather than asking
+the server for a fixed-length press.
+
+Endpoints, if you want to script it:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /` | the page |
+| `GET /stream` | multipart PNG stream, up to 15 fps |
+| `GET /frame.png` | one frame |
+| `POST /api/key` | `{"key": "MENU", "action": "down"}` — also `up` or `tap` |
+| `POST /api/release-all` | release every key, if one ever sticks |
+| `GET /api/status` | QMP `query-status` |
+
+Frames are read with QMP `memsave`, about 1.35 ms each, and the guest keeps
+running throughout. Two details there are easy to get wrong:
+
+- **`memsave`, not `pmemsave`.** The framebuffer symbols are CPU virtual
+  addresses. `pmemsave` treats its argument as physical and returns a block of
+  zeros, so the screen renders blank with no error anywhere.
+- **Not gdb.** `screenshot.py` reads frames through gdb, which halts the guest on
+  every attach. That is unusable for a live stream and it also perturbs key
+  debounce timing.
+
+Two constraints worth knowing before you use it:
+
+- **The QMP socket takes one client.** While the server is up, `tools/key.py`
+  cannot talk to the same emulator.
+- **There is no authentication.** It binds loopback, and anyone who reaches the
+  port has full control of the emulated radio. Do not expose it.
+
+There is no PTT button: the keypad model has no PTT line, so the `press` property
+rejects the name. Unknown keys are rejected with 400 rather than forwarded.
 
 ## How the machine is put together
 
