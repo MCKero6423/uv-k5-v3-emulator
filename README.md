@@ -65,7 +65,7 @@ keypresses silently stop working. Run the test after touching that code;
     qemu/                    QEMU sources to be copied into a QEMU tree
       py32f071.c             the SoC and machine (the bulk of the work)
       armv7m_systick.*.patched  SysTick with the poll-boost property added
-    assets/
+    assets/                  flash.img, plus pristine/ as the reference copy
       calibration.bin        512-byte dump from a real radio
     deploy/                  nginx vhost for the HTTPS front end
     docs/reverse-proxy.md    how https://k6v3.mckero.dn42/ is served
@@ -74,6 +74,7 @@ keypresses silently stop working. Run the test after touching that code;
       keypad_test.py         keypad regression test, boots its own instance
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
+      restore_flash.sh       roll the flash image back to its pristine state
       uvk5_qmp.py            QMP client
       uvk5_lcd.py            framebuffer decode, PNG encode, frame grabber
       uvk5_keys.py           key names the keypad model accepts
@@ -124,6 +125,19 @@ The rest of the tests:
 ## Running
 
     python3 tools/make_flash.py     # once, builds assets/flash.img
+
+The emulator writes to that image, so a session can leave edited settings or a
+damaged EEPROM behind. `assets/pristine/` holds a checksummed copy of the image as
+first generated, and `tools/restore_flash.sh` puts it back:
+
+    tools/restore_flash.sh --verify   # is the reference copy itself intact
+    tools/restore_flash.sh --diff     # has the live image changed, and by how much
+    tools/restore_flash.sh            # restore, saving the current image first
+
+The reference copy is stored gzipped, which takes 2.3 KiB rather than 2 MiB because
+the image is nearly all 0xFF, so it is small enough to keep in git. The live image
+stays ignored: it is a build artifact that gets written to.
+
     tools/run.sh                    # starts the machine
 
     tools/where.sh                  # where the firmware is executing

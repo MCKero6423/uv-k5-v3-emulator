@@ -1,5 +1,10 @@
 # Generated flash image: 2 MB, rebuilt from calibration.bin by tools/make_flash.py.
+# The live image is a build artifact and the emulator writes to it.
 assets/flash.img
+assets/flash.img.bak-*
+# ...but assets/pristine/ is tracked on purpose: it is the never-booted
+# reference to fall back to when a session leaves the image in a bad state.
+!assets/pristine/
 
 # Host build output for the CW timing harness.
 build/
