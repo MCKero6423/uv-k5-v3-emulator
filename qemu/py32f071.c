@@ -597,6 +597,251 @@ static void keypad_class_init(ObjectClass *klass, void *data)
         "empty string releases");
 }
 
+/* ---------------------------------------------------- BK4819 transceiver */
+
+/*
+ * The BK4819/BK4829 radio chip, on a software-driven three-wire bus.
+ *
+ * Scope, stated plainly: this models the *register interface*, not the radio. The
+ * chip has no public datasheet, so App/driver/bk4819.c is the only specification
+ * available, and a driver only ever tells you which registers were written -- never
+ * what left the antenna. Keying envelopes, spurious emissions and sensitivity need a
+ * real radio and a spectrum analyser. Do not read a passing test here as evidence
+ * about RF behaviour.
+ *
+ * What it does buy: register reads return what was written instead of zero, and the
+ * few registers the firmware reads *without* having written them return plausible
+ * values. That is the difference between control flow that works and control flow
+ * that silently takes the wrong branch -- RSSI was hard zero at 18 call sites, so
+ * the S-meter read empty and scan logic could not evaluate a channel.
+ *
+ * Wiring, from App/driver/bk4819.c: CS is PF9, SCL PB8, SDA PB9, all bit-banged.
+ * A transfer is CS low, eight bits of register number MSB first with bit 7 set for a
+ * read, then sixteen bits of data in whichever direction.
+ */
+#define TYPE_UVK5_BK4819 "uvk5-bk4819"
+OBJECT_DECLARE_SIMPLE_TYPE(BK4819State, UVK5_BK4819)
+
+/* Registers the firmware reads back. Kept as named constants for the comments. */
+#define BK4819_REG_INTERRUPT   0x0C   /* bit 0 = request pending */
+#define BK4819_REG_RSSI        0x67
+#define BK4819_REG_GLITCH      0x63
+#define BK4819_REG_NOISE       0x65
+#define BK4819_REG_REVISION    0x00
+
+struct BK4819State {
+    DeviceState parent_obj;
+
+    /* Bus state. */
+    bool     cs;              /* true while selected (CS is active low) */
+    bool     scl, sda_out;
+    unsigned bit_count;
+    uint32_t shift_in;        /* bits clocked in from the guest */
+    uint8_t  cmd;             /* register number, once known */
+    bool     have_cmd;
+    bool     reading;
+    uint16_t shift_out;       /* bits being clocked out to the guest */
+
+    /* Register file. 128 registers is enough: the number field is seven bits. */
+    uint16_t regs[128];
+
+    qemu_irq sda_in;          /* drives the guest's SDA input */
+};
+
+/*
+ * Values for the registers hardware keeps updating and the firmware only ever reads.
+ * Applied at reset and again after a soft reset, since the chip would carry on
+ * measuring where this model would otherwise be left holding zeros.
+ */
+static void bk4819_seed_measurements(BK4819State *s)
+{
+    /*
+     * REG_0C bit 0 must stay clear. App/app/app.c:910 and :1417 spin on it with no
+     * timeout at all -- `while (BK4819_ReadRegister(BK4819_REG_0C) & 1u)` -- so a
+     * stuck bit hangs the guest rather than degrading gracefully. This is why the
+     * GPIO model idled PB9 low before this device existed: with the line high every
+     * read returned 0xFFFF and RADIO_SetupRegisters never returned.
+     */
+    s->regs[BK4819_REG_INTERRUPT] = 0x0000;
+
+    /*
+     * RSSI, in quarter-dB above -160 dBm, so 0x1E0 is about -40 dBm: a clear signal
+     * that is not saturating. Zero reads as -160 dBm, which made the S-meter show
+     * empty and gave squelch and scan logic a dead band at all 18 call sites.
+     */
+    s->regs[BK4819_REG_RSSI] = 0x01E0;
+
+    /* Glitch and noise counters. Low means a clean channel. */
+    s->regs[BK4819_REG_GLITCH] = 0x0010;
+    s->regs[BK4819_REG_NOISE] = 0x0010;
+}
+
+static void bk4819_reset(DeviceState *dev)
+{
+    BK4819State *s = UVK5_BK4819(dev);
+
+    memset(s->regs, 0, sizeof(s->regs));
+    s->cs = false;
+    s->scl = false;
+    s->bit_count = 0;
+    s->shift_in = 0;
+    s->have_cmd = false;
+    s->reading = false;
+    s->shift_out = 0;
+
+    bk4819_seed_measurements(s);
+}
+
+static void bk4819_update_sda(BK4819State *s)
+{
+    /*
+     * Drive the line only during a read.
+     *
+     * No need to check whether the guest has switched SDA to an input: the GPIO
+     * model keeps output and input state separate, so driving pin-in never fights
+     * the guest's own output value. Watching MODER would mean the GPIO model having
+     * to report direction changes, which it does not do.
+     */
+    if (s->cs && s->reading) {
+        qemu_set_irq(s->sda_in, (s->shift_out & 0x8000) ? 1 : 0);
+    }
+}
+
+static void bk4819_set_cs(void *opaque, int line, int level)
+{
+    BK4819State *s = opaque;
+    const bool selected = !level;      /* active low */
+
+    if (!selected && s->cs) {
+        /* Deselect ends the transfer, whatever state it reached. */
+        s->bit_count = 0;
+        s->shift_in = 0;
+        s->have_cmd = false;
+        s->reading = false;
+    }
+    s->cs = selected;
+}
+
+static void bk4819_set_scl(void *opaque, int line, int level)
+{
+    BK4819State *s = opaque;
+    const bool rising = level && !s->scl;
+    const bool falling = !level && s->scl;
+
+    s->scl = level;
+
+    if (!s->cs) {
+        return;
+    }
+
+    if (rising) {
+        if (!s->have_cmd) {
+            /* Command phase: eight bits, MSB first. */
+            s->shift_in = (s->shift_in << 1) | (s->sda_out ? 1 : 0);
+            if (++s->bit_count == 8) {
+                s->reading = (s->shift_in & 0x80) != 0;
+                s->cmd = s->shift_in & 0x7f;
+                s->have_cmd = true;
+                s->bit_count = 0;
+                s->shift_in = 0;
+                if (s->reading) {
+                    s->shift_out = s->regs[s->cmd];
+                    bk4819_update_sda(s);
+                }
+            }
+        } else if (!s->reading) {
+            /* Write phase: sixteen bits of data. */
+            s->shift_in = (s->shift_in << 1) | (s->sda_out ? 1 : 0);
+            if (++s->bit_count == 16) {
+                const uint16_t data = s->shift_in & 0xffff;
+                s->regs[s->cmd] = data;
+                s->bit_count = 0;
+                s->shift_in = 0;
+                s->have_cmd = false;
+
+                /*
+                 * REG_00 bit 15 is a soft reset, which BK4819_Init issues first
+                 * thing. On the real chip the measurement registers keep being
+                 * updated by hardware afterwards; here they have to be re-seeded,
+                 * or the reset leaves RSSI reading 0 -- i.e. -160 dBm -- and every
+                 * squelch and scan decision sees a dead band. This is exactly what
+                 * happened on the first run: 48 registers had been decoded fine and
+                 * RSSI was still zero.
+                 */
+                if (s->cmd == BK4819_REG_REVISION && (data & 0x8000)) {
+                    bk4819_seed_measurements(s);
+                }
+            }
+        }
+    }
+
+    if (falling && s->have_cmd && s->reading) {
+        /*
+         * Advance on the falling edge so the next bit is settled before the guest
+         * samples it. BK4819_ReadU16 sets SCL low, reads, then sets it high.
+         */
+        s->shift_out <<= 1;
+        s->bit_count++;
+        bk4819_update_sda(s);
+        if (s->bit_count >= 16) {
+            s->bit_count = 0;
+            s->have_cmd = false;
+            s->reading = false;
+        }
+    }
+}
+
+static void bk4819_set_sda(void *opaque, int line, int level)
+{
+    BK4819State *s = opaque;
+    s->sda_out = level;
+}
+
+static void bk4819_init(Object *obj)
+{
+    BK4819State *s = UVK5_BK4819(obj);
+    DeviceState *dev = DEVICE(obj);
+
+    qdev_init_gpio_in_named(dev, bk4819_set_cs, "cs", 1);
+    qdev_init_gpio_in_named(dev, bk4819_set_scl, "scl", 1);
+    qdev_init_gpio_in_named(dev, bk4819_set_sda, "sda", 1);
+    qdev_init_gpio_out_named(dev, &s->sda_in, "sda-in", 1);
+}
+
+/*
+ * Expose the register file over QOM as regNN, so a test can see what the firmware
+ * programmed without attaching a debugger.
+ *
+ * Reading state this way matters here: gdb pauses the guest, and the firmware's
+ * timing-sensitive paths (keypad debounce, the frequency input timeout) then behave
+ * differently, which has repeatedly produced conclusions that were artefacts of the
+ * measurement. QMP reads do not stop the guest.
+ */
+static void bk4819_get_reg(Object *obj, Visitor *v, const char *name,
+                           void *opaque, Error **errp)
+{
+    BK4819State *s = UVK5_BK4819(obj);
+    const unsigned num = (uintptr_t)opaque;
+    uint64_t value = num < ARRAY_SIZE(s->regs) ? s->regs[num] : 0;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void bk4819_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->reset = bk4819_reset;
+    dc->desc = "BK4819 transceiver register interface";
+
+    for (unsigned num = 0; num < 0x80; num++) {
+        char *prop = g_strdup_printf("reg%02x", num);
+        object_class_property_add(klass, prop, "uint64", bk4819_get_reg, NULL,
+                                  NULL, (void *)(uintptr_t)num);
+        g_free(prop);
+    }
+}
+
 /* ---------------------------------------------------------------- SPI model */
 
 /*
@@ -2049,6 +2294,7 @@ struct UVK5MachineState {
     PY32F071State soc;
     PY25Q16State  flash;
     UVK5KeypadState keypad;
+    BK4819State     bk4819;
     Clock *sysclk;
     char  *flash_image;
 };
@@ -2143,6 +2389,32 @@ static void uvk5_machine_init(MachineState *machine)
                                                        "cs", 0));
 
     /*
+     * BK4819 on its bit-banged three-wire bus: CS is PF9, SCL PB8, SDA PB9.
+     *
+     * SDA is bidirectional, so it needs both directions wired: pin-out carries what
+     * the guest drives, and the chip drives pin-in when it is clocking a register
+     * value back. Without the device, PB9 had to be idled low as a workaround so
+     * that reads returned 0 and the untimed spin on REG_0C could terminate; with a
+     * real register file the values are meaningful instead of merely survivable.
+     */
+    object_initialize_child(OBJECT(machine), "bk4819", &s->bk4819,
+                            TYPE_UVK5_BK4819);
+    qdev_realize(DEVICE(&s->bk4819), NULL, &error_fatal);
+
+    qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[3]), "pin-out", 9,
+                                qdev_get_gpio_in_named(DEVICE(&s->bk4819),
+                                                       "cs", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[1]), "pin-out", 8,
+                                qdev_get_gpio_in_named(DEVICE(&s->bk4819),
+                                                       "scl", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[1]), "pin-out", 9,
+                                qdev_get_gpio_in_named(DEVICE(&s->bk4819),
+                                                       "sda", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->bk4819), "sda-in", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->soc.gpio[1]),
+                                                       "pin-in", 9));
+
+    /*
      * The application lives at PY32_APP_OFFSET, past the bootloader. Passing
      * that as the load offset means a plain application .elf/.bin boots without
      * needing a bootloader image.
@@ -2214,6 +2486,13 @@ static const TypeInfo py32_types[] = {
         .instance_size = sizeof(UVK5KeypadState),
         .instance_init = keypad_init,
         .class_init = keypad_class_init,
+    },
+    {
+        .name = TYPE_UVK5_BK4819,
+        .parent = TYPE_DEVICE,
+        .instance_size = sizeof(BK4819State),
+        .instance_init = bk4819_init,
+        .class_init = bk4819_class_init,
     },
     {
         .name = TYPE_PY25Q16,
