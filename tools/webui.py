@@ -71,7 +71,11 @@ KEY_BINDINGS = {
 }
 
 
-def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
+POWER_ACTIONS = ("on", "off", "reset", "pause", "resume")
+
+
+def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
+               supervisor=None):
     app = Flask(__name__)
 
     # One background grabber for every client. client may be None: the emulator
@@ -79,9 +83,23 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
     pump = FramePump(client, frame_addr, status_addr, fps=TARGET_FPS, scale=scale)
     pump.start()
     app.config["PUMP"] = pump
+    app.config["SUPERVISOR"] = supervisor
+
+    def active_client():
+        """The live QMP client, or None when the emulator is off.
+
+        The supervisor is authoritative once present: it replaces the client on
+        every power cycle, so the one captured at create_app time goes stale.
+        """
+        if supervisor is not None:
+            return supervisor.client()
+        return client
 
     def set_press(value: str):
-        client.command("qom-set", path=KEYPAD_PATH, property="press", value=value)
+        target = active_client()
+        if target is None:
+            raise LookupError("emulator is off")
+        target.command("qom-set", path=KEYPAD_PATH, property="press", value=value)
 
     @app.get("/")
     def index():
@@ -89,7 +107,45 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
 
     @app.get("/api/status")
     def api_status():
-        return jsonify(client.command("query-status"))
+        target = active_client()
+        if target is None:
+            return jsonify(powered=False, status="off")
+        try:
+            info = target.command("query-status")
+        except Exception as exc:
+            # The emulator can die under us; that is a state to report, not a 500.
+            return jsonify(powered=False, status="unreachable", error=str(exc))
+        return jsonify(powered=True, **info)
+
+    @app.post("/api/power/<action>")
+    def api_power(action):
+        action = (action or "").strip().lower()
+        if action not in POWER_ACTIONS:
+            return jsonify(error=f"unknown action {action!r}",
+                           valid=list(POWER_ACTIONS)), 400
+        if supervisor is None:
+            return jsonify(
+                error="power control needs a supervisor; this server was "
+                      "started without one"), 409
+        # Refuse to kill a process we did not start. Reset is fine either way,
+        # since system_reset does not end anything.
+        if action == "off" and not supervisor.owns_process():
+            return jsonify(
+                error="this server attached to an emulator it did not start, "
+                      "so it will not stop it. Restart without --attach to "
+                      "manage the process here."), 409
+
+        {"on": supervisor.power_on,
+         "off": supervisor.power_off,
+         "reset": supervisor.reset,
+         "pause": supervisor.pause,
+         "resume": supervisor.resume}[action]()
+
+        # Point the pump at whatever client is live now. rebind(None) blanks the
+        # screen, so power off actually goes dark instead of freezing on the last
+        # frame.
+        pump.rebind(supervisor.client())
+        return jsonify(ok=True, action=action, powered=supervisor.is_running())
 
     @app.post("/api/key")
     def api_key():
@@ -117,22 +173,28 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
                 return jsonify(error="hold_ms must not be negative"), 400
             hold_ms = min(hold_ms, MAX_HOLD_MS)
 
-        if action == "down":
-            set_press(key)
-        elif action == "up":
-            set_press("")
-        else:
-            # Hold here, locally. See the note on TAP_MS: doing this as two
-            # requests puts the network round trip inside the press duration.
-            set_press(key)
-            time.sleep(hold_ms / 1000)
-            set_press("")
+        try:
+            if action == "down":
+                set_press(key)
+            elif action == "up":
+                set_press("")
+            else:
+                # Hold here, locally. See the note on TAP_MS: doing this as two
+                # requests puts the network round trip inside the press duration.
+                set_press(key)
+                time.sleep(hold_ms / 1000)
+                set_press("")
+        except LookupError:
+            return jsonify(error="emulator is off; press On first"), 409
         return jsonify(ok=True, key=key, action=action, hold_ms=hold_ms)
 
     @app.post("/api/release-all")
     def api_release_all():
         """Safety valve: an empty press clears every key in the model."""
-        set_press("")
+        try:
+            set_press("")
+        except LookupError:
+            return jsonify(error="emulator is off"), 409
         return jsonify(ok=True)
 
     def wait_for_frame(timeout: float = 2.0):

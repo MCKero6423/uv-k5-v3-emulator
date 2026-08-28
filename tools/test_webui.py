@@ -268,5 +268,148 @@ class TestStreamUsesPump(unittest.TestCase):
         self.assertEqual(app.test_client().get("/frame.png").status_code, 503)
 
 
+class FakeSupervisor:
+    """Minimal supervisor double: records calls, tracks powered state."""
+
+    def __init__(self, client=None, owns=True):
+        self._client = client
+        self._owns = owns
+        self.calls = []
+
+    def is_running(self):
+        return self._client is not None
+
+    def owns_process(self):
+        return self._owns
+
+    def client(self):
+        return self._client
+
+    def power_on(self):
+        self.calls.append("power_on")
+        if self._client is None:
+            self._client = StubClient()
+        return True
+
+    def power_off(self):
+        self.calls.append("power_off")
+        self._client = None
+        return True
+
+    def reset(self):
+        self.calls.append("reset")
+        if self._client is not None:
+            self._client.command("system_reset")
+        return True
+
+    def pause(self):
+        self.calls.append("pause")
+        if self._client is None:
+            return False
+        self._client.command("stop")
+        return True
+
+    def resume(self):
+        self.calls.append("resume")
+        if self._client is None:
+            return False
+        self._client.command("cont")
+        return True
+
+
+def make_supervised(owns=True):
+    client = StubClient()
+    sup = FakeSupervisor(client, owns=owns)
+    app = webui.create_app(client, frame_addr=0x1000, status_addr=0x2000,
+                           supervisor=sup)
+    app.config.update(TESTING=True)
+    return client, sup, app.test_client()
+
+
+class TestPowerEndpoints(unittest.TestCase):
+    def test_reset_issues_system_reset(self):
+        client, sup, http = make_supervised()
+        resp = http.post("/api/power/reset")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("reset", sup.calls)
+        self.assertIn("system_reset", [n for n, _ in client.sent])
+
+    def test_pause_and_resume(self):
+        client, sup, http = make_supervised()
+        self.assertEqual(http.post("/api/power/pause").status_code, 200)
+        self.assertEqual(http.post("/api/power/resume").status_code, 200)
+        names = [n for n, _ in client.sent]
+        self.assertIn("stop", names)
+        self.assertIn("cont", names)
+
+    def test_off_then_on(self):
+        _, sup, http = make_supervised()
+        self.assertEqual(http.post("/api/power/off").status_code, 200)
+        self.assertFalse(http.get("/api/status").get_json()["powered"])
+        self.assertEqual(http.post("/api/power/on").status_code, 200)
+        self.assertTrue(http.get("/api/status").get_json()["powered"])
+        self.assertEqual(sup.calls, ["power_off", "power_on"])
+
+    def test_unknown_action_is_rejected(self):
+        _, sup, http = make_supervised()
+        resp = http.post("/api/power/explode")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(sup.calls, [])
+
+    def test_off_is_refused_for_an_adopted_emulator(self):
+        """We did not start that process, so killing it is not ours to do."""
+        _, sup, http = make_supervised(owns=False)
+        resp = http.post("/api/power/off")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(sup.calls, [])
+
+    def test_reset_is_allowed_for_an_adopted_emulator(self):
+        """system_reset does not kill anything, so it is fine either way."""
+        _, sup, http = make_supervised(owns=False)
+        self.assertEqual(http.post("/api/power/reset").status_code, 200)
+        self.assertIn("reset", sup.calls)
+
+    def test_power_without_a_supervisor_is_409_not_500(self):
+        _, http = make_app()
+        resp = http.post("/api/power/on")
+        self.assertEqual(resp.status_code, 409)
+
+
+class TestStatusReportsPower(unittest.TestCase):
+    def test_status_includes_powered(self):
+        _, http = make_app()
+        self.assertIn("powered", http.get("/api/status").get_json())
+
+    def test_status_when_powered_off_does_not_error(self):
+        """The page must load with the emulator off, not 500."""
+        app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        http = app.test_client()
+        self.assertEqual(http.get("/").status_code, 200)
+        resp = http.get("/api/status")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.get_json()["powered"])
+
+    def test_status_reports_unreachable_when_qmp_raises(self):
+        class Broken:
+            def command(self, name, **args):
+                raise RuntimeError("socket gone")
+
+        app = webui.create_app(Broken(), frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        body = app.test_client().get("/api/status").get_json()
+        self.assertFalse(body["powered"])
+        self.assertIn("unreachable", body["status"])
+
+
+class TestKeyWhenPoweredOff(unittest.TestCase):
+    def test_key_is_refused_with_no_emulator(self):
+        """Pressing a key on a dark screen is a 409, not a crash."""
+        app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        resp = app.test_client().post("/api/key", json={"key": "MENU"})
+        self.assertEqual(resp.status_code, 409)
+
+
 if __name__ == "__main__":
     unittest.main()
