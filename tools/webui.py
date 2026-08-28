@@ -34,6 +34,10 @@ KEYPAD_PATH = "/machine/keypad"
 #   key_debounce_10ms     = 2  -> 20 ms to register a press
 #   key_repeat_delay_10ms = 40 -> 400 ms counts as HELD, a different event
 #
+# This is a property of the firmware, not a tunable. Keep it separate from the UI's
+# own hold threshold below.
+FIRMWARE_HELD_MS = 400
+#
 # The browser sends the duration it wants and the server holds the key for exactly
 # that long. It must not be reproduced by sending `down` and `up` as two requests:
 # over a slow link the round trip between them *becomes* the press duration.
@@ -63,9 +67,19 @@ MAX_HOLD_MS = 5000
 # holding past LONG_PRESS_AFTER_MS the browser sends a second, deliberately long
 # press of LONG_PRESS_MS.
 #
-# LONG_PRESS_MS must clear the firmware's 400 ms held threshold
-# (key_repeat_delay_10ms = 40) or the second press would land as another tap.
-LONG_PRESS_AFTER_MS = 400
+# LONG_PRESS_AFTER_MS is a UI decision and must NOT be set to the firmware's own
+# 400 ms boundary, even though that is where "held" begins. A deliberate click runs
+# 100-500 ms, so at 400 ms ordinary clicks sent tap *and* held, and the firmware
+# acted on both. Measured against the real firmware:
+#   held DOWN  auto-repeated, moving gMenuCursor 3 -> 12 from a single click
+#   held MENU  entered the submenu (gIsInSubMenu 0 -> 1)
+# which is what "UP/DOWN behaves like another MENU press" turned out to be.
+#
+# 900 ms is clear of any accidental click while still an obvious deliberate hold.
+LONG_PRESS_AFTER_MS = 900
+
+# The long press itself must clear the firmware's 400 ms threshold
+# (key_repeat_delay_10ms = 40) or it would land as another tap.
 LONG_PRESS_MS = 900
 
 # Lines kept in the browser's log pane. The pane is a fixed-height scroll box, so
@@ -75,6 +89,13 @@ MAX_LOG_LINES = 500
 
 BOUNDARY = "uvk5frame"
 TARGET_FPS = 15
+
+# Resend the current frame at least this often even when nothing changed.
+#
+# Sending only on change saves bandwidth but makes a static screen
+# indistinguishable from a dead connection, and a client that joined mid-idle
+# would sit blank until something moved. Slow rather than stopped.
+IDLE_FRAME_INTERVAL_S = 2.0
 
 # Physical layout of the UV-K5 keypad, for the on-screen grid.
 KEY_GRID = [
@@ -188,6 +209,9 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
         action = (body.get("action") or "tap").strip().lower()
 
         if not is_valid(key):
+            # Log refusals too: a silently dropped key is indistinguishable from
+            # a dead button in the browser.
+            log.add("key", f"{body.get('key')!r} rejected: not a key on this model")
             return jsonify(error=f"unknown key {body.get('key')!r}",
                            valid=list(KEYS)), 400
         if action not in ("down", "up", "tap"):
@@ -209,16 +233,25 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
 
         try:
             if action == "down":
+                log.add("key", f"{key} down")
                 set_press(key)
             elif action == "up":
+                log.add("key", f"{key} up")
                 set_press("")
             else:
+                # Label by what the FIRMWARE will conclude, so the log says what
+                # the radio saw. That boundary is 400 ms (key_repeat_delay_10ms),
+                # not the UI's hold threshold -- conflating the two is what caused
+                # the tap+held double send in the first place.
+                kind = "held" if hold_ms >= FIRMWARE_HELD_MS else "tap"
+                log.add("key", f"{key} {kind} {hold_ms}ms")
                 # Hold here, locally. See the note on TAP_MS: doing this as two
                 # requests puts the network round trip inside the press duration.
                 set_press(key)
                 time.sleep(hold_ms / 1000)
                 set_press("")
         except LookupError:
+            log.add("key", f"{key} ignored: emulator is off")
             return jsonify(error="emulator is off; press On first"), 409
         return jsonify(ok=True, key=key, action=action, hold_ms=hold_ms)
 
@@ -255,14 +288,19 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
         interval = 1.0 / TARGET_FPS
 
         def frames():
-            sent, seen = 0, -1
+            sent, seen, last_sent_at = 0, -1, 0.0
             while limit is None or sent < limit:
                 png = pump.latest()
                 generation = pump.generation()
-                # Send only when the pump reports a new frame. A slow client
-                # therefore falls behind in frames, never in QMP reads.
-                if png is not None and (generation != seen or limit is not None):
+                now = time.monotonic()
+                # Send on change, and otherwise at the idle keepalive rate. Change
+                # detection alone leaves a static screen looking like a dead
+                # connection, and a client joining mid-idle would stay blank.
+                stale = now - last_sent_at >= IDLE_FRAME_INTERVAL_S
+                if png is not None and (generation != seen or stale
+                                        or limit is not None):
                     seen = generation
+                    last_sent_at = now
                     yield (b"--" + BOUNDARY.encode() + b"\r\n"
                            b"Content-Type: image/png\r\n"
                            b"Content-Length: " + str(len(png)).encode()
@@ -303,8 +341,8 @@ def render_index(scale: int) -> str:
            padding:20px; background:#1e2126; border:1px solid #2d333b;
            border-radius:14px; }}
   /* pixelated keeps the 128x64 LCD crisp when scaled up */
-  #screen {{ display:block; image-rendering:pixelated; background:#c8d6b9;
-            border:3px solid #0d1117; border-radius:4px; }}
+  /* The border lives on .screenwrap so it stays put when the frame is hidden. */
+  #screen {{ display:block; image-rendering:pixelated; background:#c8d6b9; }}
   .body {{ display:flex; gap:14px; align-items:flex-start; }}
   .sides {{ display:flex; flex-direction:column; gap:8px; }}
   .pad {{ display:flex; flex-direction:column; gap:8px; }}
@@ -325,8 +363,15 @@ def render_index(scale: int) -> str:
   .pwr:disabled {{ opacity:0.5; cursor:default; }}
   #powerstate {{ font-size:12px; color:#6e7681; margin-left:auto; }}
   #powerstate.on {{ color:#3fb950; }}
-  /* Powered off is a dark panel, not a frozen last frame. */
-  .screen-off {{ background:#0b0d10 !important; }}
+  /*
+   * Powered off is a dark panel, drawn by the wrapper so the frame itself can be
+   * hidden. An earlier attempt put a dark background on the <img> alone, which
+   * changed nothing visible: the image kept painting the last frame over it, so
+   * Off looked like it had not worked.
+   */
+  .screenwrap {{ background:#0b0d10; border:3px solid #0d1117; border-radius:4px;
+                line-height:0; }}
+  .screenwrap.screen-off #screen {{ visibility:hidden; }}
   #logpane {{ align-self:stretch; }}
   #logpane summary {{ font-size:12px; color:#6e7681; cursor:pointer;
                      user-select:none; }}
@@ -349,8 +394,10 @@ def render_index(scale: int) -> str:
     <button class="pwr" data-power="reset">Reset</button>
     <span id="powerstate">-</span>
   </div>
-  <img id="screen" src="/stream" alt="radio LCD"
-       width="{128 * scale}" height="{64 * scale}">
+  <div class="screenwrap" id="screenwrap">
+    <img id="screen" src="/stream" alt="radio LCD"
+         width="{128 * scale}" height="{64 * scale}">
+  </div>
   <div class="body">
     <div class="sides">{sides}</div>
     <div class="pad">{grid}</div>
@@ -482,7 +529,8 @@ function showPower(powered) {{
   const label = document.getElementById('powerstate');
   label.textContent = powered ? 'on' : 'off';
   label.classList.toggle('on', powered);
-  document.getElementById('screen').classList.toggle('screen-off', !powered);
+  document.getElementById('screenwrap')
+    .classList.toggle('screen-off', !powered);
 }}
 
 async function poll() {{

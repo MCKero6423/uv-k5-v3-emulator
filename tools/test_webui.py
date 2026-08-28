@@ -554,5 +554,81 @@ class TestLogPane(unittest.TestCase):
         self.assertIn("clientHeight", self.body)
 
 
+class TestKeyLogging(unittest.TestCase):
+    """Keys must appear in the log, or the UI cannot be debugged from the browser."""
+
+    def test_key_press_is_logged(self):
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "MENU", "hold_ms": 60})
+        texts = [e["text"] for e in log.entries() if e["source"] == "key"]
+        self.assertTrue(any("MENU" in t for t in texts), texts)
+
+    def test_log_records_the_hold_duration(self):
+        """Distinguishing a tap from a hold is the whole point of the record."""
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "MENU", "hold_ms": 900})
+        texts = [e["text"] for e in log.entries() if e["source"] == "key"]
+        self.assertTrue(any("900" in t for t in texts), texts)
+
+    def test_log_marks_a_long_press_as_held(self):
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "MENU", "hold_ms": 900})
+        texts = [e["text"].lower() for e in log.entries() if e["source"] == "key"]
+        self.assertTrue(any("held" in t for t in texts), texts)
+
+    def test_rejected_key_is_logged_too(self):
+        """A refused key must be visible, or it looks like nothing happened."""
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "PTT"})
+        texts = [e["text"] for e in log.entries() if e["source"] == "key"]
+        self.assertTrue(any("PTT" in t for t in texts), texts)
+
+
+class TestIdleKeepalive(unittest.TestCase):
+    """A static screen must still produce frames, just slowly."""
+
+    def test_keepalive_interval_is_defined(self):
+        self.assertTrue(hasattr(webui, "IDLE_FRAME_INTERVAL_S"))
+        self.assertGreater(webui.IDLE_FRAME_INTERVAL_S, 0)
+
+    def test_keepalive_is_slower_than_the_live_rate(self):
+        """Slower on idle, but never stopped."""
+        self.assertGreater(webui.IDLE_FRAME_INTERVAL_S, 1.0 / webui.TARGET_FPS)
+
+
+class TestLongPressThresholdIsNotTrippedByNormalClicks(unittest.TestCase):
+    """A deliberate click must not be promoted to a long press.
+
+    Reproduced against the real firmware: optimistic send fires a tap at
+    pointerdown and a held press if the button is still down at the threshold. With
+    the threshold at the firmware's own 400 ms boundary, an ordinary click sent
+    BOTH, and the firmware acted on both --
+      held DOWN  auto-repeated, moving gMenuCursor 3 -> 12 in one click
+      held MENU  entered the submenu (gIsInSubMenu 0 -> 1)
+    which is exactly the reported "UP/DOWN acts like another MENU press".
+    """
+
+    def test_ui_threshold_is_well_above_a_human_click(self):
+        # Deliberate clicks run 100-500 ms. The UI threshold must sit clear of
+        # that range, not at the firmware's 400 ms event boundary.
+        self.assertGreaterEqual(webui.LONG_PRESS_AFTER_MS, 700)
+
+    def test_ui_threshold_is_above_the_firmware_boundary(self):
+        """Still needs to be past 400 ms, or the long press is not 'held'."""
+        self.assertGreater(webui.LONG_PRESS_AFTER_MS, 400)
+
+    def test_long_press_duration_clears_the_firmware_boundary(self):
+        self.assertGreater(webui.LONG_PRESS_MS, 400)
+
+    def test_page_requires_an_intentional_hold(self):
+        _, http = make_app()
+        body = http.get("/").get_data(as_text=True)
+        self.assertIn(f"LONG_PRESS_AFTER_MS = {webui.LONG_PRESS_AFTER_MS}", body)
+
+
 if __name__ == "__main__":
     unittest.main()
