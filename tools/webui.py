@@ -284,9 +284,24 @@ def render_index(scale: int) -> str:
   .side {{ width:76px; }}
   .hint {{ color:#6e7681; font-size:12px; text-align:center; max-width:430px; }}
   #status {{ font-size:12px; color:#6e7681; }}
+  .powerbar {{ display:flex; gap:8px; align-items:center; align-self:stretch; }}
+  .pwr {{ padding:6px 14px; font:inherit; color:#c9d1d9; background:#2b3138;
+         border:1px solid #3a424b; border-radius:6px; cursor:pointer; }}
+  .pwr:hover:not(:disabled) {{ background:#343b44; }}
+  .pwr:disabled {{ opacity:0.5; cursor:default; }}
+  #powerstate {{ font-size:12px; color:#6e7681; margin-left:auto; }}
+  #powerstate.on {{ color:#3fb950; }}
+  /* Powered off is a dark panel, not a frozen last frame. */
+  .screen-off {{ background:#0b0d10 !important; }}
 </style>
 </head><body>
 <div class="radio">
+  <div class="powerbar">
+    <button class="pwr" data-power="on">On</button>
+    <button class="pwr" data-power="off">Off</button>
+    <button class="pwr" data-power="reset">Reset</button>
+    <span id="powerstate">-</span>
+  </div>
   <img id="screen" src="/stream" alt="radio LCD"
        width="{128 * scale}" height="{64 * scale}">
   <div class="body">
@@ -366,14 +381,52 @@ addEventListener('blur', () => {{
   fetch('/api/release-all', {{method: 'POST'}}).catch(() => {{}});
 }});
 
+document.querySelectorAll('.pwr').forEach(btn => {{
+  btn.addEventListener('click', async () => {{
+    const action = btn.dataset.power;
+    // Off ends the guest. A stray click should not do that silently.
+    if (action === 'off' &&
+        !confirm('Power off the emulator? Guest state is lost.')) {{
+      return;
+    }}
+    document.querySelectorAll('.pwr').forEach(b => b.disabled = true);
+    try {{
+      const r = await fetch('/api/power/' + action, {{method: 'POST'}});
+      if (!r.ok) {{
+        const j = await r.json().catch(() => ({{}}));
+        document.getElementById('status').textContent =
+          'power ' + action + ' refused: ' + (j.error || r.status);
+      }}
+    }} catch (err) {{
+      document.getElementById('status').textContent = 'power failed: ' + err;
+    }} finally {{
+      document.querySelectorAll('.pwr').forEach(b => b.disabled = false);
+      poll();
+      // Restart the stream: the old one ends when the emulator goes away.
+      const img = document.getElementById('screen');
+      img.src = '/stream?t=' + Date.now();
+    }}
+  }});
+}});
+
+function showPower(powered) {{
+  const label = document.getElementById('powerstate');
+  label.textContent = powered ? 'on' : 'off';
+  label.classList.toggle('on', powered);
+  document.getElementById('screen').classList.toggle('screen-off', !powered);
+}}
+
 async function poll() {{
   try {{
     const r = await fetch('/api/status');
     const s = await r.json();
+    showPower(!!s.powered);
     document.getElementById('status').textContent =
-      'guest: ' + (s.status || 'unknown');
+      s.powered ? ('guest: ' + (s.status || 'unknown'))
+                : 'powered off -- press On to boot';
   }} catch (err) {{
-    document.getElementById('status').textContent = 'emulator unreachable';
+    showPower(false);
+    document.getElementById('status').textContent = 'server unreachable';
   }}
 }}
 poll();

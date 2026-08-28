@@ -411,5 +411,31 @@ class TestKeyWhenPoweredOff(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
 
 
+class TestPowerBar(unittest.TestCase):
+    def setUp(self):
+        _, http = make_app()
+        self.body = http.get("/").get_data(as_text=True)
+
+    def test_has_power_buttons(self):
+        for action in ("on", "off", "reset"):
+            self.assertIn(f'data-power="{action}"', self.body)
+
+    def test_power_bar_is_above_the_screen(self):
+        """The user asked for it on top."""
+        self.assertLess(self.body.index('data-power="on"'),
+                        self.body.index('id="screen"'))
+
+    def test_power_off_asks_for_confirmation(self):
+        """Off kills the emulator; a stray click should not do that silently."""
+        self.assertIn("confirm(", self.body)
+
+    def test_shows_the_powered_state(self):
+        self.assertIn("powerstate", self.body)
+
+    def test_dims_the_screen_when_off(self):
+        """A dark screen is the signal that the machine is off."""
+        self.assertIn("screen-off", self.body)
+
+
 if __name__ == "__main__":
     unittest.main()
