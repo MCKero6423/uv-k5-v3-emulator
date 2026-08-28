@@ -69,6 +69,7 @@ keypresses silently stop working. Run the test after touching that code;
       calibration.bin        512-byte dump from a real radio
     docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
+      keypad_test.py         keypad regression test, boots its own instance
     harness/, stubs/, shim/, tests/   host build of the CW timing chain (stage A)
 
 ## Building
@@ -98,6 +99,14 @@ Needs a QEMU 7.2 source tree, `meson`, `ninja`, `libfdt-dev`, `libglib2.0-dev`,
     cd $QEMU
     ./configure --target-list=arm-softmmu --disable-docs --disable-tools
     cd build && ninja qemu-system-arm
+
+Then check the build actually works, which takes about a minute:
+
+    python3 tools/keypad_test.py
+
+This matters more than it looks. The keypad can break silently under -O2 without
+any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean
+build is not evidence that keypresses work.
 
 ## Running
 

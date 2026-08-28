@@ -57,6 +57,12 @@ Rebuild after editing the machine:
 
     cd $QEMU/build && ninja qemu-system-arm    # ~10 s incremental
 
+After any change near the keypad or the GPIO wiring, run the regression test. It
+boots its own instance on private ports, so it does not disturb a `run.sh`
+session:
+
+    python3 tools/keypad_test.py
+
 ## Things that already went wrong
 
 **GDB breakpoints halt the guest.** A key held across a breakpoint session is
@@ -80,20 +86,31 @@ unnamed `qdev_init_gpio_in` and `qdev_init_gpio_out` makes `qdev_get_gpio_in()`
 ambiguous, and board wiring silently attaches to the wrong line. The GPIO model
 uses `"pin-in"` and `"pin-out"` for this reason. Keep it that way.
 
-**Key hold times must be generous.** Guest time runs fast, so 400 ms of wall
-clock was too short for the firmware's debounce to complete. `key.py` holds for
-2500 ms. If a press seems ignored, lengthen it before suspecting the wiring.
+**Key hold times must be SHORT, not generous.** This entry used to say the
+opposite -- that guest time runs fast so a press needs a long hold, and that
+`key.py` should hold for 2500 ms. That was wrong and it broke the keypad tooling
+for a long time. 2500 ms is ~250 firmware ticks, six times past the long-press
+threshold, so every press was dispatched as a *hold* and handlers that act on a
+short release did nothing. See the keypad section below; `key.py` now holds 200 ms.
 
 **Verify a tool's own parsing before trusting its output.** `gpio_watch.py`
 reported `IDR=0x0000` for several rounds because its regex did not match gdb's
 output format at all. The register was fine; the reader was broken. Cross-check
 with `tools/gpiob_dump.sh`, which uses a different path.
 
-## The keypad works: it was always the hold time
+## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
-pointed at the machine model. The model was never the problem, and there was only
-ever one cause: `tools/key.py` held every key for 2500 ms.
+blamed the machine model. There turned out to be two independent causes, in this
+order:
+
+1. **`tools/key.py` held every key for 2500 ms** — a tooling bug, covered
+   immediately below.
+2. **`row_out` was not `volatile`, so GCC deleted the row-driving code** — a real
+   model bug, introduced later while removing debug prints. See
+   [row_out must stay volatile](#row_out-must-stay-volatile-or-gcc-deletes-the-keypad).
+
+Both are fixed and `tools/keypad_test.py` guards against regressions in either.
 
 The two SysTick mechanisms are separate, and conflating them caused this:
 
