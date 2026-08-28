@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for the web UI. Stubs the QMP client, so no emulator needed."""
+import time
 import unittest
 
 import webui
@@ -155,6 +156,55 @@ class TestFrontEnd(unittest.TestCase):
 
     def test_does_not_offer_ptt(self):
         self.assertNotIn('data-key="PTT"', self.body)
+
+
+class TestHoldMs(unittest.TestCase):
+    """Press duration must be produced by the server, not by request timing.
+
+    At 400 ms RTT the gap between a `down` request and an `up` request is itself
+    ~400 ms, which the firmware reads as a held key (key_repeat_delay_10ms = 40).
+    Measured against the real server: an intended tap arrived as 407 ms. Holding
+    server-side is what makes a short press possible over a slow link.
+    """
+
+    def setUp(self):
+        self.client, self.http = make_app()
+
+    def test_hold_ms_presses_and_releases(self):
+        resp = self.http.post("/api/key", json={"key": "MENU", "hold_ms": 120})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.client.presses(), ["MENU", ""])
+
+    def test_hold_ms_is_honoured_server_side(self):
+        start = time.monotonic()
+        self.http.post("/api/key", json={"key": "MENU", "hold_ms": 150})
+        elapsed = (time.monotonic() - start) * 1000
+        self.assertGreaterEqual(elapsed, 140)
+        self.assertLess(elapsed, 400)
+
+    def test_hold_ms_defaults_to_a_short_press(self):
+        resp = self.http.post("/api/key", json={"key": "UP"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["hold_ms"], webui.TAP_MS)
+
+    def test_hold_ms_is_clamped(self):
+        resp = self.http.post("/api/key", json={"key": "UP", "hold_ms": 99999})
+        self.assertEqual(resp.status_code, 200)
+        self.assertLessEqual(resp.get_json()["hold_ms"], webui.MAX_HOLD_MS)
+
+    def test_hold_ms_rejects_nonsense(self):
+        resp = self.http.post("/api/key", json={"key": "UP", "hold_ms": "soon"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.client.presses(), [])
+
+    def test_hold_ms_rejects_negative(self):
+        resp = self.http.post("/api/key", json={"key": "UP", "hold_ms": -5})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_long_hold_is_preserved_not_clamped_to_a_tap(self):
+        """A deliberate long press must stay long, or hold events break."""
+        resp = self.http.post("/api/key", json={"key": "MENU", "hold_ms": 900})
+        self.assertEqual(resp.get_json()["hold_ms"], 900)
 
 
 if __name__ == "__main__":

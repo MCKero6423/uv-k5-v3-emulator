@@ -31,9 +31,22 @@ KEYPAD_PATH = "/machine/keypad"
 # Firmware thresholds, from App/misc.c:
 #   key_debounce_10ms     = 2  -> 20 ms to register a press
 #   key_repeat_delay_10ms = 40 -> 400 ms counts as HELD, a different event
-# A tap has to sit between those. Real down/up events from the browser carry
-# their own duration, which is why they are preferred over tap.
+#
+# The browser sends the duration it measured and the server holds the key for
+# exactly that long. It must not be reproduced by sending `down` and `up` as two
+# requests: over a slow link the round trip between them *becomes* the press
+# duration. Measured against this server at 400 ms RTT, an intended tap arrived as
+# a 407 ms hold, so every short press was dispatched as a held key and handlers
+# like MAIN_Key_MENU did nothing. Jitter either side of the threshold is what made
+# it look intermittent rather than simply broken.
 TAP_MS = 200
+
+# Below the 20 ms debounce nothing registers at all, so even a very fast click has
+# to ask for at least this long.
+MIN_HOLD_MS = 60
+
+# A hold longer than this is a stuck key or a typo, not intent.
+MAX_HOLD_MS = 5000
 
 BOUNDARY = "uvk5frame"
 TARGET_FPS = 15
@@ -86,15 +99,30 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
             return jsonify(error=f"unknown action {action!r}",
                            valid=["down", "up", "tap"]), 400
 
+        hold_raw = body.get("hold_ms")
+        if hold_raw is None:
+            hold_ms = TAP_MS
+        else:
+            try:
+                hold_ms = int(hold_raw)
+            except (TypeError, ValueError):
+                return jsonify(
+                    error=f"hold_ms must be a number, got {hold_raw!r}"), 400
+            if hold_ms < 0:
+                return jsonify(error="hold_ms must not be negative"), 400
+            hold_ms = min(hold_ms, MAX_HOLD_MS)
+
         if action == "down":
             set_press(key)
         elif action == "up":
             set_press("")
         else:
+            # Hold here, locally. See the note on TAP_MS: doing this as two
+            # requests puts the network round trip inside the press duration.
             set_press(key)
-            time.sleep(TAP_MS / 1000)
+            time.sleep(hold_ms / 1000)
             set_press("")
-        return jsonify(ok=True, key=key, action=action)
+        return jsonify(ok=True, key=key, action=action, hold_ms=hold_ms)
 
     @app.post("/api/release-all")
     def api_release_all():
