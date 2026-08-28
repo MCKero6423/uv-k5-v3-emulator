@@ -477,10 +477,40 @@ the firmware had not collected the interrupt. That is a latent hang, because
 them with the bit stuck never returns. Shipping a model that leaves a hang armed is
 worse than shipping one without an S-meter.
 
-Anyone retrying should first work out *why* the flag was not collected — a gate
-upstream of the interrupt loop, or ordering against the receive state machine — rather
-than raising it at a different moment and hoping. The signal that it is right is
-`REG_0C` reading 0 afterwards, which `tools/test_bk4819.py` already asserts.
+**Second attempt, and the actual reason.** Tried again, this time evaluating squelch
+when the firmware *polls* `REG_0C` rather than when it configures the chip — which
+fixed the original mistake, since the startup sequence writes `REG_3F` as `0x0000`
+then `0x0C0C` three times over, so a flag raised on the enabling write was disabled
+again before anyone read it. Also corrected the threshold field: the RSSI open level
+is `REG_78` bits 15:8 at 0.5 dB/step against `REG_67`'s 0.25 dB/step, not anything in
+`REG_4E` (those low bits are the *glitch* threshold, and using them meant squelch
+never opened at all).
+
+With that right, everything on the chip side lines up — measured `en=0x0C0C`,
+`rssi=0x01E0`, threshold 94, and `REG_0C` correctly returning 1. The firmware still
+never acknowledged. The reason is not on the chip side at all:
+
+    gCurrentFunction=5 (FUNCTION_POWER_SAVE), gRxIdleMode=1
+
+and the gate is `app/app.c:1697`:
+
+    if (gCurrentFunction != FUNCTION_POWER_SAVE || !gRxIdleMode)
+        CheckRadioInterrupts();
+
+Both halves are false in that state, so `CheckRadioInterrupts` is never called and
+nothing can collect the flag. The emulator idles in power save, which is why this is
+the steady state rather than a transient.
+
+Gating on `REG_30` (which `BK4819_Sleep` zeroes on each power-save cycle) did not help
+either: the chip is awake at the moment the model is asked, while the firmware still
+has `gRxIdleMode=1`. Chip state and firmware state are not in step, so no condition
+available *inside* the device model can decide this correctly.
+
+So this is not a matter of finding a better trigger. A working version has to either
+keep the guest out of power save, or drive the interrupt from something that knows the
+firmware's receive state — neither of which belongs in a register model. Both attempts
+are reverted; the check that would confirm a third is `REG_0C` reading 0 afterwards,
+which `tools/test_bk4819.py` asserts.
 
 **Where it stops.** This models the register interface, not the radio. It reproduces
 what the firmware *commanded* — frequency, power step, carrier keying in time — never
