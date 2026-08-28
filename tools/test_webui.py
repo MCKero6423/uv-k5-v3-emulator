@@ -207,17 +207,14 @@ class TestFrontEndHoldMs(unittest.TestCase):
     def test_sends_hold_ms(self):
         self.assertIn("hold_ms", self.body)
 
-    def test_measures_press_duration_in_the_browser(self):
-        self.assertIn("performance.now()", self.body)
-
     def test_does_not_send_separate_down_and_up_for_taps(self):
         """Two requests per key double the latency and break at 400 ms RTT."""
         self.assertNotIn("send(key, 'down')", self.body)
         self.assertNotIn("send(key, 'up')", self.body)
 
-    def test_enforces_a_minimum_hold(self):
-        """A very fast click still has to clear the 20 ms debounce."""
-        self.assertIn("MIN_HOLD_MS", self.body)
+    def test_uses_a_measured_tap_length(self):
+        """The tap length is a server-side constant, not a browser measurement."""
+        self.assertIn("TAP_MS", self.body)
 
 
 class TestStreamUsesPump(unittest.TestCase):
@@ -469,6 +466,44 @@ class TestStartsPoweredOff(unittest.TestCase):
         src = inspect.getsource(webui.main)
         # power_on may only appear under the attach branch, never unconditionally.
         self.assertNotIn("supervisor.power_on()", src)
+
+
+class TestOptimisticSend(unittest.TestCase):
+    """The request must leave on pointerdown, not on release.
+
+    Waiting for pointerup spends the whole click duration with the network idle:
+    on a 400 ms link a 120 ms click cost 650 ms click-to-visible instead of 530 ms,
+    because nothing was in flight while the button was down.
+    """
+
+    def setUp(self):
+        _, http = make_app()
+        self.body = http.get("/").get_data(as_text=True)
+
+    def test_sends_from_pointerdown(self):
+        # down() must issue the request itself rather than only recording a time.
+        down_fn = self.body.split("function down(key)")[1].split("function up(")[0]
+        self.assertIn("sendKey(", down_fn,
+                      "down() must fire the request immediately")
+
+    def test_up_does_not_send_the_press(self):
+        up_fn = self.body.split("function up(key)")[1].split("}")[0]
+        self.assertNotIn("sendKey(", up_fn,
+                         "up() must not be where the press is sent")
+
+    def test_long_press_is_still_reachable(self):
+        """Holding must still produce a held event, or long-press breaks."""
+        self.assertIn("LONG_PRESS_MS", self.body)
+        self.assertIn("LONG_PRESS_AFTER_MS", self.body)
+
+    def test_long_press_threshold_is_past_the_firmware_boundary(self):
+        """Must exceed 400 ms or the firmware will not call it held."""
+        self.assertGreater(webui.LONG_PRESS_MS, 400)
+        self.assertGreaterEqual(webui.LONG_PRESS_AFTER_MS, 400)
+
+    def test_optimistic_hold_is_a_short_press(self):
+        """The speculative press must stay under the held threshold."""
+        self.assertLess(webui.TAP_MS, 400)
 
 
 if __name__ == "__main__":

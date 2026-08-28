@@ -33,21 +33,39 @@ KEYPAD_PATH = "/machine/keypad"
 #   key_debounce_10ms     = 2  -> 20 ms to register a press
 #   key_repeat_delay_10ms = 40 -> 400 ms counts as HELD, a different event
 #
-# The browser sends the duration it measured and the server holds the key for
-# exactly that long. It must not be reproduced by sending `down` and `up` as two
-# requests: over a slow link the round trip between them *becomes* the press
-# duration. Measured against this server at 400 ms RTT, an intended tap arrived as
-# a 407 ms hold, so every short press was dispatched as a held key and handlers
-# like MAIN_Key_MENU did nothing. Jitter either side of the threshold is what made
-# it look intermittent rather than simply broken.
-TAP_MS = 200
-
-# Below the 20 ms debounce nothing registers at all, so even a very fast click has
-# to ask for at least this long.
-MIN_HOLD_MS = 60
+# The browser sends the duration it wants and the server holds the key for exactly
+# that long. It must not be reproduced by sending `down` and `up` as two requests:
+# over a slow link the round trip between them *becomes* the press duration.
+# Measured against this server at 400 ms RTT, an intended tap arrived as a 407 ms
+# hold, so every short press was dispatched as a held key and handlers like
+# MAIN_Key_MENU did nothing. Jitter either side of the threshold is what made it
+# look intermittent rather than simply broken.
+#
+# TAP_MS is latency the user pays directly, because the request does not return
+# until the hold finishes. So it is measured, not guessed: with 12 trials per
+# value, 20 ms registered only 5/12 times while 30 ms was 12/12. The nominal 20 ms
+# debounce is not enough on its own -- KEYBOARD_Poll samples each column 8 times
+# and wants 2 matching reads, so the real floor sits above it. 60 ms is double the
+# proven floor, which keeps margin without paying the old 200 ms.
+#
+# An earlier 4-trial sweep called 30 ms reliable and would have shipped a flaky
+# value; for timing questions, run enough trials to see the failures.
+TAP_MS = 60
 
 # A hold longer than this is a stuck key or a typo, not intent.
 MAX_HOLD_MS = 5000
+
+# Long-press support under optimistic send.
+#
+# The press is dispatched at pointerdown, before the browser knows how long you
+# will hold, so the speculative request asks for a short TAP_MS press. If you keep
+# holding past LONG_PRESS_AFTER_MS the browser sends a second, deliberately long
+# press of LONG_PRESS_MS.
+#
+# LONG_PRESS_MS must clear the firmware's 400 ms held threshold
+# (key_repeat_delay_10ms = 40) or the second press would land as another tap.
+LONG_PRESS_AFTER_MS = 400
+LONG_PRESS_MS = 900
 
 BOUNDARY = "uvk5frame"
 TARGET_FPS = 15
@@ -318,8 +336,11 @@ def render_index(scale: int) -> str:
 </div>
 <script>
 const BINDINGS = {json.dumps(KEY_BINDINGS)};
-const MIN_HOLD_MS = {MIN_HOLD_MS};
+const TAP_MS = {TAP_MS};
+const LONG_PRESS_AFTER_MS = {LONG_PRESS_AFTER_MS};
+const LONG_PRESS_MS = {LONG_PRESS_MS};
 const pressedAt = new Map();
+const longTimers = new Map();
 
 async function sendKey(key, holdMs) {{
   try {{
@@ -338,21 +359,36 @@ function mark(key, on) {{
     .forEach(el => el.classList.toggle('active', on));
 }}
 
-// One request per key, carrying the duration as a number. Sending 'down' and
-// 'up' as two requests would put the network round trip inside the press: at
-// 400 ms RTT every tap arrived as a ~407 ms hold, which the firmware dispatches
-// as a held key and MAIN_Key_MENU ignores.
+// Fire at pointerdown, not at release. Latency is the thing worth optimising
+// here: waiting for pointerup leaves the network idle for the whole click, which
+// on a 400 ms link cost ~120 ms per key for nothing.
+//
+// The duration is not known yet at this point, so the speculative request asks
+// for a short press. Holding past LONG_PRESS_AFTER_MS sends a second, long press,
+// which is how held events stay reachable.
+//
+// The duration still travels as a number rather than as two down/up requests: the
+// round trip between those would itself exceed the firmware's 400 ms held
+// threshold and turn every tap into a hold.
 function down(key) {{
   if (pressedAt.has(key)) return;
   pressedAt.set(key, performance.now());
   mark(key, true);
+  sendKey(key, TAP_MS);
+  longTimers.set(key, setTimeout(() => {{
+    // Still held, so the user meant a long press.
+    if (pressedAt.has(key)) sendKey(key, LONG_PRESS_MS);
+  }}, LONG_PRESS_AFTER_MS));
 }}
 function up(key) {{
-  const started = pressedAt.get(key);
-  if (started === undefined) return;
+  if (!pressedAt.has(key)) return;
   pressedAt.delete(key);
+  const timer = longTimers.get(key);
+  if (timer !== undefined) {{
+    clearTimeout(timer);
+    longTimers.delete(key);
+  }}
   mark(key, false);
-  sendKey(key, Math.max(performance.now() - started, MIN_HOLD_MS));
 }}
 
 document.querySelectorAll('.key').forEach(btn => {{
