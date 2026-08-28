@@ -68,7 +68,7 @@ keypresses silently stop working. Run the test after touching that code;
     assets/
       calibration.bin        512-byte dump from a real radio
     deploy/                  nginx vhost for the HTTPS front end
-    docs/reverse-proxy.md    how https://k6v6.mckero.dn42/ is served
+    docs/reverse-proxy.md    how https://k6v3.mckero.dn42/ is served
     docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
       keypad_test.py         keypad regression test, boots its own instance
@@ -190,7 +190,7 @@ Two constraints worth knowing before you use it:
 ### Reaching it from elsewhere
 
 The deployment here runs the server on loopback and puts nginx in front of it for
-TLS, at `https://k6v6.mckero.dn42/`. See
+TLS, at `https://k6v3.mckero.dn42/`. See
 [docs/reverse-proxy.md](docs/reverse-proxy.md) for the vhost, including the two
 settings that matter for this app: `proxy_buffering off` (or the frame stream
 arrives in bursts) and `X-Forwarded-For` (or every log line is attributed to

@@ -1,6 +1,6 @@
 # Serving the web UI over HTTPS
 
-How `https://k6v6.mckero.dn42/` is set up on this host. The emulator UI itself
+How `https://k6v3.mckero.dn42/` is set up on this host. The emulator UI itself
 speaks plain HTTP on loopback; nginx terminates TLS and proxies to it.
 
 ## Why a proxy at all
@@ -11,21 +11,21 @@ letting nginx face the network means the existing certificate and the existing
 
 ## The vhost
 
-Lives in `/etc/nginx/sites-available/k6v6`, symlinked into `sites-enabled/`. A copy
-is kept in this repo at [`deploy/nginx-k6v6.conf`](../deploy/nginx-k6v6.conf), since
+Lives in `/etc/nginx/sites-available/k6v3`, symlinked into `sites-enabled/`. A copy
+is kept in this repo at [`deploy/nginx-k6v3.conf`](../deploy/nginx-k6v3.conf), since
 nothing else here version-controls `/etc`.
 
     server {
         listen 172.21.91.140:80;
         listen [fd3c:3f9b:6424:2::5]:80;
-        server_name k6v6.mckero.dn42;
+        server_name k6v3.mckero.dn42;
         return 301 https://$host$request_uri;
     }
 
     server {
         listen 172.21.91.140:443 ssl;
         listen [fd3c:3f9b:6424:2::5]:443 ssl;
-        server_name k6v6.mckero.dn42;
+        server_name k6v3.mckero.dn42;
 
         ssl_certificate     /etc/letsencrypt/live/mckero-wildcard/fullchain.pem;
         ssl_certificate_key /etc/letsencrypt/live/mckero-wildcard/privkey.pem;
@@ -92,8 +92,8 @@ the UI is not reachable from the internet.
 
 Records to point at it:
 
-    k6v6.mckero.dn42.  A     172.21.91.140
-    k6v6.mckero.dn42.  AAAA  fd3c:3f9b:6424:2::5
+    k6v3.mckero.dn42.  A     172.21.91.140
+    k6v3.mckero.dn42.  AAAA  fd3c:3f9b:6424:2::5
 
 ## Pitfalls hit while setting this up
 
@@ -114,19 +114,19 @@ connections, check `ss -ltnp | grep 443` before looking anywhere else.
 
     # both families, and check the certificate rather than skipping it with -k
     curl -s -o /dev/null -w '%{http_code}\n' \
-        --resolve 'k6v6.mckero.dn42:443:172.21.91.140' \
-        https://k6v6.mckero.dn42/
+        --resolve 'k6v3.mckero.dn42:443:172.21.91.140' \
+        https://k6v3.mckero.dn42/
     curl -s -g -o /dev/null -w '%{http_code}\n' \
-        --resolve 'k6v6.mckero.dn42:443:[fd3c:3f9b:6424:2::5]' \
-        https://k6v6.mckero.dn42/
+        --resolve 'k6v3.mckero.dn42:443:[fd3c:3f9b:6424:2::5]' \
+        https://k6v3.mckero.dn42/
 
     # the stream must deliver frames continuously, not in one burst at the end
-    curl -sk --resolve 'k6v6.mckero.dn42:443:172.21.91.140' \
-        https://k6v6.mckero.dn42/stream | head -c 20000 | grep -c PNG
+    curl -sk --resolve 'k6v3.mckero.dn42:443:172.21.91.140' \
+        https://k6v3.mckero.dn42/stream | head -c 20000 | grep -c PNG
 
     # log attribution: entries should carry the real client address, not 127.0.0.1
-    curl -sk --resolve 'k6v6.mckero.dn42:443:172.21.91.140' \
-        https://k6v6.mckero.dn42/api/logs
+    curl -sk --resolve 'k6v3.mckero.dn42:443:172.21.91.140' \
+        https://k6v3.mckero.dn42/api/logs
 
 Measured after setup: HTTP 200 on both families with the certificate validating,
 first stream frame in 0.01 s, 7 frames in 12 s on an idle screen, and log entries
