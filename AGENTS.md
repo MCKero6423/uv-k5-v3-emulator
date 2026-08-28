@@ -13,6 +13,70 @@ deliberate: the models are small and tightly coupled to each other's wiring, and
 splitting them would spread the board layout out without making any of it
 clearer.
 
+## How it boots
+
+Worth reading before debugging anything that looks like a startup problem. There is
+no bootloader, no kernel, no partition table and no filesystem -- the firmware is
+the only code on the machine and it owns the CPU outright.
+
+**The hardware knows two numbers.** A Cortex-M0+ coming out of reset does not run
+any boot logic. It loads SP from the first word of the vector table and PC from the
+second, and starts executing. That is the whole handoff.
+
+    .isr_vector  0x08002800  (readelf -SW, size 0xc0)
+      +0x00      0x20004000  initial SP, i.e. the top of the 16 KB SRAM
+      +0x04      0x08002d49  Reset_Handler, and the ELF entry point
+
+Read it straight off the image when in doubt -- the bytes are little-endian, so
+`00400020 492d0008` is SP 0x20004000 followed by PC 0x08002d49:
+
+    objdump -s -j .isr_vector firmware.elf | head -5
+
+The odd address is not a typo: bit 0 flags Thumb state and the hardware masks it
+off when fetching.
+
+**`PY32_APP_OFFSET` 0x2800 is load-bearing.** Flash starts at `0x08000000` but the
+first 10 KB is the factory bootloader region, so the application sits after it.
+`armv7m_load_kernel()` is passed that offset for exactly this reason -- load at
+`0x08000000` instead and the vector table lands in the wrong place, so the very
+first fetch faults.
+
+**Startup is 31 lines of assembly**, in the firmware's
+`Core/startup_py32f071xx.s`:
+
+    set SP from _estack
+    bl SystemInit
+    copy .data from flash (_sidata) into RAM (_sdata .. _edata)
+    zero .bss (_sbss .. _ebss)
+    bl __libc_init_array
+    bl main
+    LoopForever: b LoopForever      @ main never returns
+
+The copy and the zero-fill are the interesting part. Initialised globals live in
+flash but have to be writable, so they are copied word by word into RAM;
+uninitialised globals must read as zero per the C standard, so `.bss` is cleared.
+On a hosted OS the kernel and the loader do this for you. Here nobody does, so if
+either loop is wrong you get globals that are silently garbage.
+
+**Then the application:**
+
+    main()                  Core/Src/main.c -- clock config only, then Main()
+      Main()                App/main.c -- the actual firmware
+        SYSTICK_Init()      the 10 ms tick everything is timed against
+        BOARD_Init()        GPIO, SPI, LCD, keypad matrix
+        UART_Init()         where the SERIAL banner in the log comes from
+        SETTINGS_InitEEPROM()   reads settings over SPI from the flash image
+        while (1) { ... }   main loop, never exits
+
+**There is no filesystem.** The nearest thing to "mounting a partition" is
+`SETTINGS_InitEEPROM()` reading fixed byte offsets over SPI: `0xA008` for the power
+save byte, `0x0E70` for the VFO indices, and so on. No metadata, no directory, no
+checksum -- just an address that the code and the data both have to agree on. When
+a setting reads back wrong, suspect the offset before suspecting the transport.
+
+The ~15 s to reach the main loop is emulation overhead. A real radio is up in about
+a second.
+
 ## Ground rules
 
 **Never edit the firmware to make the emulator work.** The firmware is the
