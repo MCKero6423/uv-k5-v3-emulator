@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""Web remote control for the UV-K5 emulator.
+
+Serves the LCD as a live stream and maps on-screen buttons to the keypad model,
+so the emulated radio can be driven from a browser.
+
+Start the emulator first (tools/run.sh), then:
+
+    python3 tools/webui.py --frame-addr 0x200013DC --status-addr 0x2000175C
+
+Then open http://127.0.0.1:8080/
+
+Two things worth knowing:
+
+  * The QMP socket takes a single client, so tools/key.py cannot talk to the same
+    emulator while this server is running.
+  * There is no authentication. It binds loopback and anyone who reaches the port
+    has full control of the emulated radio. Do not expose it.
+"""
+import argparse
+import json
+import time
+
+from flask import Flask, Response, jsonify, request
+
+from uvk5_keys import KEYS, is_valid, normalise
+from uvk5_lcd import FrameGrabber, encode_png, unpack
+
+KEYPAD_PATH = "/machine/keypad"
+
+# Firmware thresholds, from App/misc.c:
+#   key_debounce_10ms     = 2  -> 20 ms to register a press
+#   key_repeat_delay_10ms = 40 -> 400 ms counts as HELD, a different event
+# A tap has to sit between those. Real down/up events from the browser carry
+# their own duration, which is why they are preferred over tap.
+TAP_MS = 200
+
+BOUNDARY = "uvk5frame"
+TARGET_FPS = 15
+
+# Physical layout of the UV-K5 keypad, for the on-screen grid.
+KEY_GRID = [
+    ["MENU", "UP",   "DOWN", "EXIT"],
+    ["1",    "2",    "3",    "STAR"],
+    ["4",    "5",    "6",    "0"],
+    ["7",    "8",    "9",    "F"],
+]
+SIDE_KEYS = ["SIDE1", "SIDE2"]
+
+# Keyboard shortcuts -> radio keys.
+KEY_BINDINGS = {
+    "ArrowUp": "UP", "ArrowDown": "DOWN",
+    "Enter": "MENU", "Escape": "EXIT",
+    "KeyF": "F", "KeyM": "MENU",
+    "BracketLeft": "SIDE1", "BracketRight": "SIDE2",
+    "Digit0": "0", "Digit1": "1", "Digit2": "2", "Digit3": "3", "Digit4": "4",
+    "Digit5": "5", "Digit6": "6", "Digit7": "7", "Digit8": "8", "Digit9": "9",
+}
+
+
+def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
+    app = Flask(__name__)
+    grabber = FrameGrabber(client, frame_addr, status_addr)
+
+    def set_press(value: str):
+        client.command("qom-set", path=KEYPAD_PATH, property="press", value=value)
+
+    @app.get("/")
+    def index():
+        return Response(render_index(scale), mimetype="text/html")
+
+    @app.get("/api/status")
+    def api_status():
+        return jsonify(client.command("query-status"))
+
+    @app.post("/api/key")
+    def api_key():
+        body = request.get_json(silent=True) or {}
+        key = normalise(body.get("key", ""))
+        action = (body.get("action") or "tap").strip().lower()
+
+        if not is_valid(key):
+            return jsonify(error=f"unknown key {body.get('key')!r}",
+                           valid=list(KEYS)), 400
+        if action not in ("down", "up", "tap"):
+            return jsonify(error=f"unknown action {action!r}",
+                           valid=["down", "up", "tap"]), 400
+
+        if action == "down":
+            set_press(key)
+        elif action == "up":
+            set_press("")
+        else:
+            set_press(key)
+            time.sleep(TAP_MS / 1000)
+            set_press("")
+        return jsonify(ok=True, key=key, action=action)
+
+    @app.post("/api/release-all")
+    def api_release_all():
+        """Safety valve: an empty press clears every key in the model."""
+        set_press("")
+        return jsonify(ok=True)
+
+    @app.get("/frame.png")
+    def frame_png():
+        return Response(grabber.png(scale), mimetype="image/png",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.get("/stream")
+    def stream():
+        # limit exists for tests; unset means stream until the client leaves.
+        limit = request.args.get("limit", type=int)
+        interval = 1.0 / TARGET_FPS
+
+        def frames():
+            sent, last = 0, None
+            while limit is None or sent < limit:
+                started = time.monotonic()
+                status, frame = grabber.raw()
+                current = (status, frame)
+                # Only re-encode when the screen actually changed: the LCD is
+                # static most of the time, so idle CPU stays near zero.
+                if current != last or limit is not None:
+                    last = current
+                    png = encode_png(unpack(status, frame), scale)
+                    yield (b"--" + BOUNDARY.encode() + b"\r\n"
+                           b"Content-Type: image/png\r\n"
+                           b"Content-Length: " + str(len(png)).encode()
+                           + b"\r\n\r\n" + png + b"\r\n")
+                    sent += 1
+                slack = interval - (time.monotonic() - started)
+                if slack > 0:
+                    time.sleep(slack)
+
+        return Response(frames(),
+                        mimetype=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
+                        headers={"Cache-Control": "no-store",
+                                 "X-Accel-Buffering": "no"})
+
+    return app
+
+
+def render_index(scale: int) -> str:
+    grid = "\n".join(
+        "<div class='row'>" + "".join(
+            f'<button class="key" data-key="{k}">{"*" if k == "STAR" else k}</button>'
+            for k in row) + "</div>"
+        for row in KEY_GRID
+    )
+    sides = "".join(
+        f'<button class="key side" data-key="{k}">{k}</button>' for k in SIDE_KEYS
+    )
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UV-K5 remote</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin:0; min-height:100vh; display:grid; place-items:center;
+         background:#15171a; color:#c9d1d9;
+         font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }}
+  .radio {{ display:flex; flex-direction:column; align-items:center; gap:14px;
+           padding:20px; background:#1e2126; border:1px solid #2d333b;
+           border-radius:14px; }}
+  /* pixelated keeps the 128x64 LCD crisp when scaled up */
+  #screen {{ display:block; image-rendering:pixelated; background:#c8d6b9;
+            border:3px solid #0d1117; border-radius:4px; }}
+  .body {{ display:flex; gap:14px; align-items:flex-start; }}
+  .sides {{ display:flex; flex-direction:column; gap:8px; }}
+  .pad {{ display:flex; flex-direction:column; gap:8px; }}
+  .row {{ display:flex; gap:8px; }}
+  .key {{ width:62px; height:44px; font:inherit; font-weight:600; color:#c9d1d9;
+         background:#2b3138; border:1px solid #3a424b; border-radius:8px;
+         cursor:pointer; user-select:none; -webkit-user-select:none;
+         touch-action:manipulation; }}
+  .key:hover {{ background:#343b44; }}
+  .key.active {{ background:#4b8bf5; border-color:#4b8bf5; color:#fff; }}
+  .side {{ width:76px; }}
+  .hint {{ color:#6e7681; font-size:12px; text-align:center; max-width:430px; }}
+  #status {{ font-size:12px; color:#6e7681; }}
+</style>
+</head><body>
+<div class="radio">
+  <img id="screen" src="/stream" alt="radio LCD"
+       width="{128 * scale}" height="{64 * scale}">
+  <div class="body">
+    <div class="sides">{sides}</div>
+    <div class="pad">{grid}</div>
+  </div>
+  <div id="status">connecting...</div>
+  <p class="hint">Hold a key to send a long press: over 400 ms the firmware
+  treats it as held, which is a different event. Arrows move, Enter is MENU,
+  Esc is EXIT, digits map straight through. No PTT button -- the keypad model
+  has no PTT line.</p>
+</div>
+<script>
+const BINDINGS = {json.dumps(KEY_BINDINGS)};
+const held = new Set();
+
+async function send(key, action) {{
+  try {{
+    await fetch('/api/key', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{key: key, action: action}})
+    }});
+  }} catch (err) {{
+    document.getElementById('status').textContent = 'send failed: ' + err;
+  }}
+}}
+
+function mark(key, on) {{
+  document.querySelectorAll('[data-key="' + key + '"]')
+    .forEach(el => el.classList.toggle('active', on));
+}}
+
+// Press duration is decided by the browser, not the server.
+function down(key) {{
+  if (held.has(key)) return;
+  held.add(key);
+  mark(key, true);
+  send(key, 'down');
+}}
+function up(key) {{
+  if (!held.has(key)) return;
+  held.delete(key);
+  mark(key, false);
+  send(key, 'up');
+}}
+
+document.querySelectorAll('.key').forEach(btn => {{
+  const key = btn.dataset.key;
+  btn.addEventListener('pointerdown', ev => {{ ev.preventDefault(); down(key); }});
+  btn.addEventListener('pointerup', ev => {{ ev.preventDefault(); up(key); }});
+  btn.addEventListener('pointerleave', () => up(key));
+  btn.addEventListener('pointercancel', () => up(key));
+  btn.addEventListener('contextmenu', ev => ev.preventDefault());
+}});
+
+addEventListener('keydown', ev => {{
+  const key = BINDINGS[ev.code];
+  if (!key || ev.repeat) return;
+  ev.preventDefault();
+  down(key);
+}});
+addEventListener('keyup', ev => {{
+  const key = BINDINGS[ev.code];
+  if (!key) return;
+  ev.preventDefault();
+  up(key);
+}});
+// Release on blur, so losing focus mid-press cannot leave a key stuck down.
+addEventListener('blur', () => {{
+  [...held].forEach(up);
+  fetch('/api/release-all', {{method: 'POST'}}).catch(() => {{}});
+}});
+
+async function poll() {{
+  try {{
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    document.getElementById('status').textContent =
+      'guest: ' + (s.status || 'unknown');
+  }} catch (err) {{
+    document.getElementById('status').textContent = 'emulator unreachable';
+  }}
+}}
+poll();
+setInterval(poll, 3000);
+</script>
+</body></html>"""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--qmp", default="/tmp/uvk5-qmp.sock")
+    ap.add_argument("--frame-addr", type=lambda v: int(v, 0), required=True,
+                    help="address of gFrameBuffer (moves between builds)")
+    ap.add_argument("--status-addr", type=lambda v: int(v, 0), required=True,
+                    help="address of gStatusLine")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--scale", type=int, default=4)
+    args = ap.parse_args()
+
+    from uvk5_qmp import QmpClient
+    client = QmpClient(args.qmp)
+    app = create_app(client, args.frame_addr, args.status_addr, args.scale)
+    print(f"serving on http://{args.host}:{args.port}/  "
+          f"(no authentication; loopback only unless you changed --host)")
+    app.run(host=args.host, port=args.port, threaded=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
