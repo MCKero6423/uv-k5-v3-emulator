@@ -14,6 +14,7 @@ started with run.sh. Then `power_off` must refuse, because we did not start that
 process and killing it is not ours to do.
 """
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -41,10 +42,26 @@ def default_launcher(qemu: str, flash: str, elf: str,
 
 
 def wait_for_socket(path: str, timeout: float = 15.0) -> bool:
+    """Wait until something is actually accepting connections on `path`.
+
+    Existence is not enough. A unix socket file outlives the process that created
+    it, so a crashed or killed emulator leaves one behind, and a plain
+    os.path.exists() check returns immediately and the connect then fails with
+    ECONNREFUSED -- which surfaces as power on returning 500. Probing with a real
+    connect distinguishes "listening" from "leftover file".
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if os.path.exists(path):
-            return True
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(1.0)
+                probe.connect(path)
+                return True
+            except OSError:
+                pass                  # stale, or not listening yet
+            finally:
+                probe.close()
         time.sleep(0.05)
     return False
 
@@ -96,7 +113,22 @@ class Supervisor:
             if self._client is not None:
                 return False
             self._proc = self._launch()
-            self._client = self._connect()
+            try:
+                self._client = self._connect()
+            except Exception as exc:
+                # Do not leave a half-started emulator behind: the process would
+                # keep running with no client tracking it, hold the QMP socket, and
+                # block the next power on. Clean up and report instead.
+                proc, self._proc = self._proc, None
+                self._client = None
+                if proc is not None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        proc.kill()
+                self._note(f"power on failed: {exc}")
+                raise
             proc = self._proc
         self._note("power on")
         # Forward QEMU's own stderr, which run.sh and the tests used to discard.

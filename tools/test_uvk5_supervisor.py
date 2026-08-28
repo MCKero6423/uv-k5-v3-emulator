@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the QEMU supervisor. Uses a fake launcher, not real QEMU."""
+import os
+import socket
 import unittest
 
 from uvk5_supervisor import Supervisor
@@ -194,6 +196,45 @@ class TestSupervisorLogging(unittest.TestCase):
         sup = Supervisor(launch=lambda: FakeProc(), connect=FakeClient)
         sup.power_on()
         sup.power_off()
+
+
+class TestWaitForSocket(unittest.TestCase):
+    """A leftover socket file must not be mistaken for a listening emulator.
+
+    Hit for real: a killed QEMU left /tmp/uvk5-qmp.sock behind, wait_for_socket
+    returned immediately because the path existed, and the connect then failed with
+    ECONNREFUSED -- which the user saw as power on returning HTTP 500.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "qmp.sock")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_returns_false_for_a_stale_socket_file(self):
+        from uvk5_supervisor import wait_for_socket
+        # A socket file with nothing listening: bind then close.
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(self.path)
+        srv.close()
+        self.assertTrue(os.path.exists(self.path), "need a leftover file")
+        self.assertFalse(wait_for_socket(self.path, timeout=0.5))
+
+    def test_returns_true_when_something_is_listening(self):
+        from uvk5_supervisor import wait_for_socket
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(self.path)
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        self.assertTrue(wait_for_socket(self.path, timeout=2))
+
+    def test_returns_false_when_the_path_never_appears(self):
+        from uvk5_supervisor import wait_for_socket
+        self.assertFalse(wait_for_socket(self.path + ".missing", timeout=0.3))
 
 
 if __name__ == "__main__":

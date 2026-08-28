@@ -197,11 +197,20 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
         # a shared log "who powered it off" is the useful part.
         log.add("power", f"{action} requested", ip=client_ip())
 
-        {"on": supervisor.power_on,
-         "off": supervisor.power_off,
-         "reset": supervisor.reset,
-         "pause": supervisor.pause,
-         "resume": supervisor.resume}[action]()
+        try:
+            {"on": supervisor.power_on,
+             "off": supervisor.power_off,
+             "reset": supervisor.reset,
+             "pause": supervisor.pause,
+             "resume": supervisor.resume}[action]()
+        except Exception as exc:
+            # Starting the emulator can genuinely fail -- a stale QMP socket, a
+            # missing binary, a port already taken. Report it as a failed action
+            # rather than a 500 with a traceback the browser cannot show.
+            log.add("power", f"{action} failed: {exc}", ip=client_ip())
+            pump.rebind(supervisor.client())
+            return jsonify(error=f"{action} failed: {exc}",
+                           powered=supervisor.is_running()), 503
 
         # Point the pump at whatever client is live now. rebind(None) blanks the
         # screen, so power off actually goes dark instead of freezing on the last
