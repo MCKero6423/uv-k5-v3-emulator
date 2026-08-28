@@ -145,6 +145,75 @@ Two things about it that matter when working on this repo:
 Its tests: `tools/test_uvk5_*.py` and `tools/test_webui.py` need no emulator,
 `tools/test_webui_e2e.py` boots its own.
 
+## The flash bugs: four faults, one symptom
+
+"The frequency will not change" and "flash forgets everything after power off"
+looked like two complaints. They were one root cause plus three real bugs found on
+the way, all in this file. Worth reading before touching SPI, DMA or the flash
+model, because each was invisible from the layer above.
+
+1. **DMA used the wrong address space** — the actual cause. It moved bytes through
+   `address_space_memory`, which cannot decode this SoC's memory at all: the
+   container region is handed only to the ARMv7M core and never registered with
+   global system memory. Reads returned `MEMTX_DECODE_ERROR` and zeros; writes went
+   nowhere. DMA now runs over an `AddressSpace` built on the container.
+2. **Page program did not wrap.** Real SPI NOR latches only the low address bits,
+   so a burst past the 256-byte page boundary continues at the start of the same
+   page. The model walked straight through, and a 512-byte burst at 0x008F00 (which
+   the firmware really does send in one CS assertion) spilled into 0x009000.
+3. **DMA started too early.** Transfers ran when a channel was enabled, but on
+   hardware they start when the peripheral raises its request. The driver arms both
+   channels, then enables SPI, then sets TXDMAEN — so firing at arm time clocked
+   the bus before the read command had been sent.
+4. **DMA channels ran one after another.** SPI is duplex and the driver pairs a
+   dummy-feeding TX channel with a data-collecting RX channel over one transfer.
+   Running them in sequence let TX finish before RX ever sampled the bus.
+
+Any one of them zeroed the sector holding per-band VFO frequencies.
+`RADIO_ConfigureChannel` substitutes a band's lower limit only for `0xFFFFFFFF`, so
+a stored zero was taken literally and clamped to `BX4819_band1_lower` — 18 MHz.
+That is the whole explanation for a typed frequency always reverting.
+
+`tools/test_freq_entry.py` and the `MUST_NOT_CHANGE` guard in
+`tools/test_flash_persist.py` exist to catch a regression in any of the four.
+
+### What made this hard to find, and what to do instead
+
+**Instrument the model, not the guest.** The frequency input box times out after
+`key_input_timeout_500ms / 3`, about 2.5 s, and a gdb attach takes roughly 3 s. So
+probing between digits clears the box, and the run reports a failure that the
+measurement caused. This produced at least three confident wrong conclusions,
+including "the firmware saved band 0" when the box had simply emptied. Add an
+`fprintf` to `qemu/py32f071.c` and read stderr instead — the guest never stops.
+
+**Never cap a diagnostic log before you know the shape of the data.** A probe
+limited to the first six transactions showed only `0xFF` payloads, which supported
+exactly the wrong conclusion. Without the cap, the writes that mattered were
+obvious.
+
+**Check that the build succeeded before believing a test.** A failed `ninja` leaves
+the previous binary in place and the test still runs, so a stale build silently
+answers the question. Two rounds of results were meaningless this way. Grep the
+build output for `FAILED` and `error:` and stop if either appears.
+
+**Reset the flash image between runs.** `assets/flash.img` is written by every
+session. A test that starts from it may find its work already done — which shows up
+as "the image is byte-identical", indistinguishable from broken persistence. Start
+from `assets/pristine/`, and power the emulator off *before* restoring, since
+shutdown flushes the old in-memory image back over the file.
+
+**Do not hand-compute struct offsets.** The ELF has no DWARF and the structs
+contain enums whose size cannot be assumed. Offsets computed by hand produced
+`KEY_LOCK=4` and `TX_VFO=11`, neither of which is a possible value. Either use a
+symbol that `nm` reports and whose type is unambiguous (`gInputBoxIndex` is a plain
+`uint8_t`), or locate a field by behaviour — toggling the keypad lock with a long
+`F` press and diffing the region found `KEY_LOCK` at `gEeprom+0x12` in one step.
+
+**Read your own probe output carefully.** One probe printed `phase` before it was
+incremented, which made a correct address decoder look off by one byte. Replaying
+the logic in Python cleared it up; without that, a working implementation would
+have been "fixed".
+
 ## Things that already went wrong
 
 **GDB breakpoints halt the guest.** A key held across a breakpoint session is

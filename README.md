@@ -72,6 +72,8 @@ keypresses silently stop working. Run the test after touching that code;
     docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
       keypad_test.py         keypad regression test, boots its own instance
+      test_flash_persist.py  flash writes survive a power cycle
+      test_freq_entry.py     a typed frequency takes effect and persists
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
       restore_flash.sh       roll the flash image back to its pristine state
@@ -111,10 +113,15 @@ Needs a QEMU 7.2 source tree, `meson`, `ninja`, `libfdt-dev`, `libglib2.0-dev`,
 Then check the build actually works, which takes about a minute:
 
     python3 tools/keypad_test.py
+    python3 tools/test_flash_persist.py
+    python3 tools/test_freq_entry.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean
-build is not evidence that keypresses work.
+build is not evidence that keypresses work. The other two cover the flash path,
+where four separate faults each ended up zeroing stored frequencies without
+producing any error: details in
+[AGENTS.md](AGENTS.md#the-flash-bugs-four-faults-one-symptom).
 
 The rest of the tests:
 
