@@ -220,5 +220,53 @@ class TestFrontEndHoldMs(unittest.TestCase):
         self.assertIn("MIN_HOLD_MS", self.body)
 
 
+class TestStreamUsesPump(unittest.TestCase):
+    """Serving frames must not cost QMP reads: the pump owns the grabbing."""
+
+    def _app(self):
+        client = StubClient()
+        app = webui.create_app(client, frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        return client, app, app.test_client()
+
+    def _wait(self, app, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if app.config["PUMP"].latest() is not None:
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_exposes_the_pump(self):
+        _, app, _ = self._app()
+        self.assertIn("PUMP", app.config)
+
+    def test_serving_frames_costs_no_qmp_reads(self):
+        client, app, http = self._app()
+        self.assertTrue(self._wait(app), "pump produced no frame")
+
+        before = len([n for n, _ in client.sent if n == "memsave"])
+        http.get("/stream?limit=1")
+        http.get("/frame.png")
+        after = len([n for n, _ in client.sent if n == "memsave"])
+        # The pump keeps grabbing in the background, so allow a little drift;
+        # what must not happen is a read per request.
+        self.assertLess(after - before, 8,
+                        "serving a frame triggered fresh QMP reads")
+
+    def test_frame_png_still_returns_a_png(self):
+        _, app, http = self._app()
+        self.assertTrue(self._wait(app))
+        resp = http.get("/frame.png")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_data().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_frame_png_returns_503_when_there_is_no_frame(self):
+        """No frame is a state, not a crash: the emulator may be powered off."""
+        app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        self.assertEqual(app.test_client().get("/frame.png").status_code, 503)
+
+
 if __name__ == "__main__":
     unittest.main()

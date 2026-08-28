@@ -24,7 +24,7 @@ import time
 from flask import Flask, Response, jsonify, request
 
 from uvk5_keys import KEYS, is_valid, normalise
-from uvk5_lcd import FrameGrabber, encode_png, unpack
+from uvk5_stream import FramePump
 
 KEYPAD_PATH = "/machine/keypad"
 
@@ -73,7 +73,12 @@ KEY_BINDINGS = {
 
 def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
     app = Flask(__name__)
-    grabber = FrameGrabber(client, frame_addr, status_addr)
+
+    # One background grabber for every client. client may be None: the emulator
+    # can be powered off, and the page still has to load.
+    pump = FramePump(client, frame_addr, status_addr, fps=TARGET_FPS, scale=scale)
+    pump.start()
+    app.config["PUMP"] = pump
 
     def set_press(value: str):
         client.command("qom-set", path=KEYPAD_PATH, property="press", value=value)
@@ -130,9 +135,21 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
         set_press("")
         return jsonify(ok=True)
 
+    def wait_for_frame(timeout: float = 2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            png = pump.latest()
+            if png is not None:
+                return png
+            time.sleep(0.02)
+        return None
+
     @app.get("/frame.png")
     def frame_png():
-        return Response(grabber.png(scale), mimetype="image/png",
+        png = wait_for_frame()
+        if png is None:
+            return jsonify(error="no frame available; is the emulator on?"), 503
+        return Response(png, mimetype="image/png",
                         headers={"Cache-Control": "no-store"})
 
     @app.get("/stream")
@@ -142,24 +159,21 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4):
         interval = 1.0 / TARGET_FPS
 
         def frames():
-            sent, last = 0, None
+            sent, seen = 0, -1
             while limit is None or sent < limit:
-                started = time.monotonic()
-                status, frame = grabber.raw()
-                current = (status, frame)
-                # Only re-encode when the screen actually changed: the LCD is
-                # static most of the time, so idle CPU stays near zero.
-                if current != last or limit is not None:
-                    last = current
-                    png = encode_png(unpack(status, frame), scale)
+                png = pump.latest()
+                generation = pump.generation()
+                # Send only when the pump reports a new frame. A slow client
+                # therefore falls behind in frames, never in QMP reads.
+                if png is not None and (generation != seen or limit is not None):
+                    seen = generation
                     yield (b"--" + BOUNDARY.encode() + b"\r\n"
                            b"Content-Type: image/png\r\n"
                            b"Content-Length: " + str(len(png)).encode()
                            + b"\r\n\r\n" + png + b"\r\n")
                     sent += 1
-                slack = interval - (time.monotonic() - started)
-                if slack > 0:
-                    time.sleep(slack)
+                else:
+                    time.sleep(interval)
 
         return Response(frames(),
                         mimetype=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
