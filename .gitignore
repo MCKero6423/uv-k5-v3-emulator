@@ -10,3 +10,6 @@ build/
 
 # Screenshots used in the README are committed on purpose.
 !docs/screenshots/*.png
+
+# Plan documents from the plan skill: local working notes.
+.hermes/
