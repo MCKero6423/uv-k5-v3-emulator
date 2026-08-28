@@ -40,7 +40,7 @@ has no public datasheet, so its driver is the only specification available.
 | Frequency entry | works, stored per band and kept |
 | Keypad and menu navigation | works, including waking from power save |
 | Serial output (firmware log) | works, appears in the web UI log |
-| Serial input / CPS programming | **not implemented**, see [AGENTS.md](AGENTS.md#what-this-cannot-do) |
+| Serial input, CPS programming protocol | works, `-serial` any chardev |
 | Timing accuracy | deliberately wrong, see [Timing](#timing) |
 | Radio/RF behaviour | not modelled |
 
@@ -77,6 +77,8 @@ keypresses silently stop working. Run the test after touching that code;
       keypad_test.py         keypad regression test, boots its own instance
       test_flash_persist.py  flash writes survive a power cycle
       test_freq_entry.py     a typed frequency takes effect and persists
+      test_serial_rx.py      the firmware answers programming commands
+      lib_kill_emulator.sh   cleanup that only ever kills emulators
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
       restore_flash.sh       roll the flash image back to its pristine state
@@ -118,6 +120,7 @@ Then check the build actually works, which takes about a minute:
     python3 tools/keypad_test.py
     python3 tools/test_flash_persist.py
     python3 tools/test_freq_entry.py
+    python3 tools/test_serial_rx.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean

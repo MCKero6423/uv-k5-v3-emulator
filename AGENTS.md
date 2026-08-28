@@ -452,26 +452,32 @@ from a passing emulator test.
 Timing is also deliberately wrong — see the SysTick section in README.md. Fine
 for menus and control flow; useless for signal timing.
 
-**Serial receive does not work.** Transmit does — the firmware banner and its
-`printf` output reach stderr and the web UI log — but nothing can be sent *to* the
-firmware. Two things are missing, and both would need building:
+## Serial, both directions
 
-- USART1 is a `py32-stub` with no chardev backend, so there is no source of
-  incoming bytes.
-- `driver/uart.c` receives over DMA channel 2 in `LL_DMA_MODE_CIRCULAR` and finds
-  the write pointer with `sizeof(UART_DMA_Buffer) - LL_DMA_GetDataLength(...)`. The
-  DMA model only services SPI and never decrements `CNDTR` for USART, so that
-  expression is always 0 and the firmware sees an empty buffer. A channel sitting
-  permanently armed with `cndtr=256` and `cpar=0x40013804` is this, not a bug.
+Works, and `tools/test_serial_rx.py` proves it by speaking the real protocol:
+`0x0514` hello gets a `0x0515` ack, and `0x051B` returns the requested EEPROM bytes.
+Attach with `-serial unix:/path/to.sock` or any other chardev; it defaults to
+`serial0`.
 
-What that costs: `UART_IsCommandAvailable` never fires, so the whole UV-K5
-programming protocol in `app/uart.c` is unreachable — `0x0514` handshake, `0x051B`
-EEPROM read, `0x051D` EEPROM write, `0x05DD` reset. CPS/CHIRP-style tools cannot
-talk to this emulator. Keypad, screen and the web UI are unaffected.
+Three things had to line up, and each failed silently on its own:
 
-Doing it properly means giving USART1 a real chardev, implementing circular-mode
-DMA with a decrementing `CNDTR`, and driving it from receive rather than from
-`TXDMAEN` as the SPI path does.
+- **USART1 needs a chardev.** It is otherwise a register stub with nowhere for
+  incoming bytes to come from.
+- **DMA has to service USART, decrementing `CNDTR`.** `driver/uart.c` never reads
+  DR. It receives over a circular channel and locates new data with
+  `sizeof(UART_DMA_Buffer) - LL_DMA_GetDataLength(...)`, so a count that never moves
+  means a buffer that always looks empty, no matter how many bytes arrived. The
+  service runs on a `CNDTR` read, which is exactly where the driver looks — no timer
+  needed, and nothing can be delivered before the guest asks for it.
+- **DR writes must also reach the chardev.** They used to go only to stderr. A host
+  tool would send a command, the firmware would answer, and the answer went
+  somewhere the tool could not see. That is indistinguishable from being ignored,
+  and it cost a debugging round: the first run of the new test reported "no reply at
+  all" alongside *zero* bytes of boot output, which looked like broken receive when
+  in fact transmit was fine and simply invisible.
+
+Channels also record the length they were programmed with, because `CNDTR` counts
+down and the write offset has to come from the difference.
 
 ## If you add a peripheral
 
