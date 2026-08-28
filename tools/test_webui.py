@@ -437,5 +437,39 @@ class TestPowerBar(unittest.TestCase):
         self.assertIn("screen-off", self.body)
 
 
+class TestStartsPoweredOff(unittest.TestCase):
+    """The emulator must not be running until the user asks for it."""
+
+    def test_app_with_no_client_serves_a_dark_screen(self):
+        app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        http = app.test_client()
+
+        self.assertEqual(http.get("/").status_code, 200)
+        self.assertFalse(http.get("/api/status").get_json()["powered"])
+        # No frame yet, and that is a state rather than an error.
+        self.assertEqual(http.get("/frame.png").status_code, 503)
+
+    def test_page_offers_an_on_button_while_off(self):
+        app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        body = app.test_client().get("/").get_data(as_text=True)
+        self.assertIn('data-power="on"', body)
+
+    def test_main_has_an_attach_flag_not_an_own_flag(self):
+        """Owning the process is the default; attaching is the opt-in."""
+        import inspect
+        src = inspect.getsource(webui.main)
+        self.assertIn("--attach", src)
+        self.assertNotIn("--own-emulator", src)
+
+    def test_main_does_not_power_on_at_startup(self):
+        """Arriving at a dark screen is the point; do not boot it for them."""
+        import inspect
+        src = inspect.getsource(webui.main)
+        # power_on may only appear under the attach branch, never unconditionally.
+        self.assertNotIn("supervisor.power_on()", src)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ Two things worth knowing:
 """
 import argparse
 import json
+import os
 import time
 
 from flask import Flask, Response, jsonify, request
@@ -445,13 +446,46 @@ def main() -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--scale", type=int, default=4)
+    ap.add_argument("--attach", action="store_true",
+                    help="attach to an emulator started elsewhere (run.sh) "
+                         "instead of managing one. Off is then refused, since "
+                         "this server did not start that process.")
+    ap.add_argument("--qemu", default=os.path.expanduser(
+        "~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm"))
+    ap.add_argument("--elf", default=os.path.expanduser(
+        "~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf"))
+    ap.add_argument("--flash", default=os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "assets", "flash.img"))
+    ap.add_argument("--gdb-port", type=int, default=1234)
     args = ap.parse_args()
 
     from uvk5_qmp import QmpClient
-    client = QmpClient(args.qmp)
-    app = create_app(client, args.frame_addr, args.status_addr, args.scale)
-    print(f"serving on http://{args.host}:{args.port}/  "
-          f"(no authentication; loopback only unless you changed --host)")
+    from uvk5_supervisor import Supervisor, default_launcher, wait_for_socket
+
+    def connect():
+        if not wait_for_socket(args.qmp, timeout=15):
+            raise RuntimeError(f"QMP socket never appeared at {args.qmp}")
+        return QmpClient(args.qmp)
+
+    supervisor = Supervisor(
+        launch=default_launcher(args.qemu, args.flash, args.elf, args.qmp,
+                                gdb_port=args.gdb_port),
+        connect=connect)
+
+    if args.attach:
+        # Someone else owns the process; adopt it so the screen works, but Off
+        # will refuse.
+        supervisor.adopt(connect())
+    # Otherwise the emulator stays OFF on purpose. The user presses On, so the
+    # page behaves like walking up to a machine rather than finding it booted.
+
+    app = create_app(supervisor.client(), args.frame_addr, args.status_addr,
+                     args.scale, supervisor=supervisor)
+    print(f"serving on http://{args.host}:{args.port}/")
+    print("attached to a running emulator" if args.attach
+          else "emulator is OFF; press On in the browser to boot it")
+    print("no authentication: anyone who can reach this port controls the radio")
     app.run(host=args.host, port=args.port, threaded=True)
     return 0
 
