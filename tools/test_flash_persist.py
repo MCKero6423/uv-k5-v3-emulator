@@ -43,10 +43,19 @@ QMP = "/tmp/uvk5-persist-test.sock"
 # guessed. The mapping is in App/driver/eeprom_compat.c: these are *flash* addresses,
 # not the EEPROM addresses the settings code uses, and an earlier version of this test
 # watched EEPROM offsets by mistake and reported "same" for everything.
+#
+# These were 0x008100 and 0x00A100 while page-program wrapping was missing from the
+# model: writes ran past the page boundary and landed a page high. With wrapping in
+# place the firmware's writes align to the sector, as they do on real hardware.
 WATCH = [
-    ("mr/vfo attrs", 0x008100, 0x20),   # 1024 MR + 7 VFO attributes, 2 bytes each
-    ("settings", 0x00A100, 0x20),       # the settings block
+    ("mr/vfo attrs", 0x008000, 0x20),   # 1024 MR + 7 VFO attributes, 2 bytes each
+    ("settings", 0x00A000, 0x20),       # the settings block
 ]
+
+# Must stay untouched: this is where per-band VFO frequencies live. The missing page
+# wrap let a 512-byte burst at 0x008F00 spill into it, zeroing stored frequencies so
+# every typed frequency reverted to BX4819_band1_lower (18 MHz).
+MUST_NOT_CHANGE = [("vfo frequencies", 0x009000, 0xD6)]
 
 
 class Qmp:
@@ -128,7 +137,8 @@ def sha(path):
 
 def snapshot(path):
     data = open(path, "rb").read()
-    return {name: data[off:off + length] for name, off, length in WATCH}
+    regions = WATCH + MUST_NOT_CHANGE
+    return {name: data[off:off + length] for name, off, length in regions}
 
 
 def main():
@@ -181,6 +191,17 @@ def main():
                 "regions holding settings and channel data were not written")
         else:
             print("PASS  the settings and channel regions were written")
+
+        # The frequency area must be left alone. A page-program burst that fails to
+        # wrap spills into it and zeroes stored frequencies, which is what made a
+        # typed frequency always revert to 18 MHz.
+        spilled = [n for n, _, _ in MUST_NOT_CHANGE if after[n] != before[n]]
+        if spilled:
+            failures.append(
+                f"{', '.join(spilled)} was overwritten -- a write spilled past a "
+                "page boundary into the VFO frequency area")
+        else:
+            print("PASS  the VFO frequency area was not overwritten")
 
         # A second boot must see what the first one left behind.
         print("\nbooting again from the same file")

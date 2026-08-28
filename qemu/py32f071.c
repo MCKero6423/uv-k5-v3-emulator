@@ -986,6 +986,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(PY25Q16State, PY25Q16)
 
 #define PY25Q16_SIZE (2 * MiB)
 
+/* Page-program buffer size. Programming wraps within a page; see PY25Q16_CMD_PP. */
+#define PY25Q16_PAGE_SIZE 0x100
+
 enum {
     PY25Q16_CMD_NONE = 0,
     PY25Q16_CMD_READ = 0x03,
@@ -1067,7 +1070,25 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
             s->data[s->addr % PY25Q16_SIZE] &= out;
             s->dirty = true;
         }
-        s->addr++;
+        /*
+         * Page program wraps within its 256-byte page: a burst that runs past the
+         * page boundary continues at the start of the same page rather than
+         * spilling into the next one. Real SPI NOR works this way because the
+         * chip latches only the low address bits into its page buffer.
+         *
+         * Without this the model let one transaction walk straight through, and a
+         * 512-byte burst at 0x008F00 overwrote 0x009000 -- which is the VFO
+         * frequency area in eeprom_compat.c's map. The stored frequency became
+         * zero, RADIO_ConfigureChannel only substitutes the band's lower limit for
+         * 0xFFFFFFFF, so the frequency was taken as 0 and clamped to
+         * BX4819_band1_lower. That is why a typed frequency always reverted to
+         * 18 MHz.
+         *
+         * Measured: the firmware really does send 512 bytes inside a single CS
+         * assertion here, so the wrap has to be modelled rather than assumed away.
+         */
+        s->addr = (s->addr & ~(PY25Q16_PAGE_SIZE - 1))
+                | ((s->addr + 1) & (PY25Q16_PAGE_SIZE - 1));
         return 0xff;
 
     case PY25Q16_CMD_SE:
