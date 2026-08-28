@@ -110,6 +110,18 @@ class Supervisor:
 
     def power_on(self) -> bool:
         with self._lock:
+            # A client object is not proof of a live guest. If the process died
+            # behind our back -- crashed, OOM-killed, or caught by someone else's
+            # cleanup -- the stale client made this return False forever, so the
+            # Power button did nothing until the whole service was restarted.
+            # Observed twice for real.
+            if self._client is not None and self._proc is not None \
+                    and self._proc.poll() is not None:
+                self._note(f"emulator exited on its own "
+                           f"(status {self._proc.returncode}); restarting")
+                self._client = None
+                self._proc = None
+
             if self._client is not None:
                 return False
             self._proc = self._launch()

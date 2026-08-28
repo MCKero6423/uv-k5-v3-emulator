@@ -3,6 +3,7 @@
 import os
 import socket
 import unittest
+import unittest.mock
 
 from uvk5_supervisor import Supervisor
 
@@ -235,6 +236,59 @@ class TestWaitForSocket(unittest.TestCase):
     def test_returns_false_when_the_path_never_appears(self):
         from uvk5_supervisor import wait_for_socket
         self.assertFalse(wait_for_socket(self.path + ".missing", timeout=0.3))
+
+
+class TestRecoversFromAnExternalKill(unittest.TestCase):
+    """Power on must work again after the emulator dies behind the supervisor's back.
+
+    Hit for real, twice: a stray cleanup killed the QEMU that webui.py owned. The
+    supervisor kept its QMP client object, so is_running() reported a broken pipe and
+    power_on() returned False immediately without relaunching -- the Power button was
+    dead until the whole service was restarted.
+    """
+
+    def _supervisor(self, clients):
+        launched = []
+
+        def launch():
+            launched.append(1)
+            proc = unittest.mock.MagicMock()
+            proc.poll.return_value = None
+            proc.stderr = None
+            return proc
+
+        def connect():
+            return clients.pop(0)
+
+        sup = Supervisor(launch, connect)
+        return sup, launched
+
+    def test_power_on_relaunches_when_the_client_is_dead(self):
+        dead = unittest.mock.MagicMock()
+        dead.command.side_effect = BrokenPipeError("dead")
+        fresh = unittest.mock.MagicMock()
+        fresh.command.return_value = {"status": "running"}
+
+        sup, launched = self._supervisor([dead, fresh])
+        self.assertTrue(sup.power_on())
+        self.assertEqual(len(launched), 1)
+
+        # An external kill: the process is gone, so poll() reports an exit status.
+        sup._proc.poll.return_value = -15
+        self.assertFalse(sup.is_running())
+
+        # Power on must notice the client is unusable and start a new emulator.
+        self.assertTrue(sup.power_on(), "power_on refused to relaunch a dead guest")
+        self.assertEqual(len(launched), 2, "no new emulator was launched")
+        self.assertTrue(sup.is_running())
+
+    def test_power_on_still_refuses_when_genuinely_running(self):
+        live = unittest.mock.MagicMock()
+        live.command.return_value = {"status": "running"}
+        sup, launched = self._supervisor([live])
+        self.assertTrue(sup.power_on())
+        self.assertFalse(sup.power_on(), "started a second emulator over a live one")
+        self.assertEqual(len(launched), 1)
 
 
 if __name__ == "__main__":

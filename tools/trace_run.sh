@@ -12,7 +12,11 @@ FLASH="$HOME/uvk5-port/sim/assets/flash.img"
 LOG=/tmp/uvk5-trace.log
 QMP=/tmp/uvk5-qmp.sock
 
-pkill -f 'M uv-k5-v3' 2>/dev/null || true
+# Never `pkill -f 'M uv-k5-v3'` here: see tools/lib_kill_emulator.sh for why that
+# takes down an unrelated webui.py along with it.
+# shellcheck source=tools/lib_kill_emulator.sh
+. "$(dirname "$0")/lib_kill_emulator.sh"
+kill_emulators "$QMP"
 rm -f "$QMP" "$LOG"
 sleep 1
 
