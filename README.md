@@ -71,6 +71,7 @@ keypresses silently stop working. Run the test after touching that code;
     tools/                   run, screenshot, inject keys, probe state
       keypad_test.py         keypad regression test, boots its own instance
       webui.py               web remote control: live LCD plus clickable keypad
+      dn42_firewall.sh       restrict the web UI port to DN42 sources
       uvk5_qmp.py            QMP client
       uvk5_lcd.py            framebuffer decode, PNG encode, frame grabber
       uvk5_keys.py           key names the keypad model accepts
@@ -181,8 +182,29 @@ Two constraints worth knowing before you use it:
 
 - **The QMP socket takes one client.** While the server is up, `tools/key.py`
   cannot talk to the same emulator.
-- **There is no authentication.** It binds loopback, and anyone who reaches the
-  port has full control of the emulated radio. Do not expose it.
+- **There is no authentication.** Anyone who reaches the port has full control of
+  the emulated radio. It binds loopback by default for that reason.
+
+### Reaching it from elsewhere
+
+`--host ::` makes it reachable off-box, which with no authentication means the
+port must be filtered by source address. `tools/dn42_firewall.sh` restricts it to
+DN42:
+
+    tools/dn42_firewall.sh apply 8080     # DN42 + loopback only
+    tools/dn42_firewall.sh show  8080     # rules and packet counts
+    tools/dn42_firewall.sh remove 8080
+
+One detail that is easy to get wrong: this host's `INPUT` policy is `ACCEPT`, so a
+rule that only *allows* DN42 changes nothing -- the port is already reachable with
+no rules at all. The rule that does the work is the final `DROP`. Verify by
+watching the counters rather than by assuming:
+
+    tools/dn42_firewall.sh show 8080
+    # a rising DROP count means non-DN42 traffic is actually being rejected
+
+The rules do not survive a reboot. Re-run `apply`, or persist them with
+`iptables-persistent`.
 
 There is no PTT button: the keypad model has no PTT line, so the `press` property
 rejects the name. Unknown keys are rejected with 400 rather than forwarded.
