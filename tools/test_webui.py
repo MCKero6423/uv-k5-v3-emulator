@@ -607,5 +607,73 @@ class TestIdleKeepalive(unittest.TestCase):
         self.assertGreater(webui.IDLE_FRAME_INTERVAL_S, 1.0 / webui.TARGET_FPS)
 
 
+class TestClientIpInLogs(unittest.TestCase):
+    """Entries carry the client IP, so a shared log says who did what."""
+
+    def test_key_entry_records_the_client_ip(self):
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "MENU", "hold_ms": 60},
+                  environ_overrides={"REMOTE_ADDR": "172.21.91.137"})
+        entries = [e for e in log.entries() if e["source"] == "key"]
+        self.assertTrue(entries)
+        self.assertEqual(entries[-1]["ip"], "172.21.91.137")
+
+    def test_power_entry_records_the_client_ip(self):
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/power/reset",
+                  environ_overrides={"REMOTE_ADDR": "172.21.91.137"})
+        entries = [e for e in log.entries() if e["source"] == "power"]
+        self.assertTrue(entries)
+        self.assertEqual(entries[-1]["ip"], "172.21.91.137")
+
+    def test_ipv6_is_recorded(self):
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "UP", "hold_ms": 60},
+                  environ_overrides={"REMOTE_ADDR": "fd3c:3f9b:6424:2::99"})
+        entries = [e for e in log.entries() if e["source"] == "key"]
+        self.assertEqual(entries[-1]["ip"], "fd3c:3f9b:6424:2::99")
+
+    def test_x_forwarded_for_is_preferred_behind_a_proxy(self):
+        """nginx reverse-proxies this, so REMOTE_ADDR is always 127.0.0.1."""
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "UP", "hold_ms": 60},
+                  environ_overrides={"REMOTE_ADDR": "127.0.0.1",
+                                     "HTTP_X_FORWARDED_FOR": "172.21.91.137"})
+        entries = [e for e in log.entries() if e["source"] == "key"]
+        self.assertEqual(entries[-1]["ip"], "172.21.91.137")
+
+    def test_only_the_first_hop_of_x_forwarded_for_is_used(self):
+        """The rest of the chain is attacker-controlled and must be ignored."""
+        client, sup, http = make_supervised()
+        log = http.application.config["LOG"]
+        http.post("/api/key", json={"key": "UP", "hold_ms": 60},
+                  environ_overrides={
+                      "REMOTE_ADDR": "127.0.0.1",
+                      "HTTP_X_FORWARDED_FOR": "172.21.91.137, 10.0.0.1"})
+        entries = [e for e in log.entries() if e["source"] == "key"]
+        self.assertEqual(entries[-1]["ip"], "172.21.91.137")
+
+    def test_entries_without_a_request_have_no_ip(self):
+        """Firmware serial and qemu output come from no client at all."""
+        from uvk5_logs import LogBuffer
+        log = LogBuffer()
+        log.add("serial", "boot banner")
+        self.assertIsNone(log.entries()[-1]["ip"])
+
+    def test_page_renders_the_ip_between_time_and_source(self):
+        _, http = make_app()
+        body = http.get("/").get_data(as_text=True)
+        # e.time + ip + source, in that order
+        line = [l for l in body.splitlines() if "e.source" in l and "e.time" in l]
+        self.assertTrue(line, "log line template not found")
+        tmpl = line[0]
+        self.assertLess(tmpl.index("e.time"), tmpl.index("ip"))
+        self.assertLess(tmpl.index("ip"), tmpl.index("e.source"))
+
+
 if __name__ == "__main__":
     unittest.main()

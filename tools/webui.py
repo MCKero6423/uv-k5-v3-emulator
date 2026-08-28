@@ -124,6 +124,20 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
     app.config["PUMP"] = pump
     app.config["SUPERVISOR"] = supervisor
 
+    def client_ip():
+        """The address of whoever made this request.
+
+        Behind the nginx reverse proxy REMOTE_ADDR is always 127.0.0.1, so the
+        first hop of X-Forwarded-For is what identifies the real client. Only the
+        first entry is trusted: the rest of the chain can be set by the caller.
+        """
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first
+        return request.remote_addr
+
     def active_client():
         """The live QMP client, or None when the emulator is off.
 
@@ -179,6 +193,10 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
                       "so it will not stop it. Restart without --attach to "
                       "manage the process here."), 409
 
+        # Attribute the action here: the supervisor has no request context, and on
+        # a shared log "who powered it off" is the useful part.
+        log.add("power", f"{action} requested", ip=client_ip())
+
         {"on": supervisor.power_on,
          "off": supervisor.power_off,
          "reset": supervisor.reset,
@@ -200,7 +218,8 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
         if not is_valid(key):
             # Log refusals too: a silently dropped key is indistinguishable from
             # a dead button in the browser.
-            log.add("key", f"{body.get('key')!r} rejected: not a key on this model")
+            log.add("key", f"{body.get('key')!r} rejected: not a key on this model",
+                    ip=client_ip())
             return jsonify(error=f"unknown key {body.get('key')!r}",
                            valid=list(KEYS)), 400
         if action not in ("down", "up", "tap"):
@@ -222,10 +241,10 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
 
         try:
             if action == "down":
-                log.add("key", f"{key} down")
+                log.add("key", f"{key} down", ip=client_ip())
                 set_press(key)
             elif action == "up":
-                log.add("key", f"{key} up")
+                log.add("key", f"{key} up", ip=client_ip())
                 set_press("")
             else:
                 # Label by what the FIRMWARE will conclude, so the log says what
@@ -233,14 +252,14 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
                 # not the UI's hold threshold -- conflating the two is what caused
                 # the tap+held double send in the first place.
                 kind = "held" if hold_ms >= FIRMWARE_HELD_MS else "tap"
-                log.add("key", f"{key} {kind} {hold_ms}ms")
+                log.add("key", f"{key} {kind} {hold_ms}ms", ip=client_ip())
                 # Hold here, locally. See the note on TAP_MS: doing this as two
                 # requests puts the network round trip inside the press duration.
                 set_press(key)
                 time.sleep(hold_ms / 1000)
                 set_press("")
         except LookupError:
-            log.add("key", f"{key} ignored: emulator is off")
+            log.add("key", f"{key} ignored: emulator is off", ip=client_ip())
             return jsonify(error="emulator is off; press On first"), 409
         return jsonify(ok=True, key=key, action=action, hold_ms=hold_ms)
 
@@ -548,7 +567,13 @@ async function pollLogs() {{
       pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
 
     for (const e of j.entries) {{
-      pre.textContent += e.time + ' [' + e.source + '] ' + e.text + '\\n';
+      // IP sits between the time and the source. The log is shared by everyone
+      // who opens the page, so attribution is what makes it readable when two
+      // people are pressing keys. Entries with no client behind them -- firmware
+      // serial, qemu output -- show a dash.
+      const ip = e.ip ? e.ip : '-';
+      pre.textContent += e.time + ' ' + ip + ' [' + e.source + '] '
+                       + e.text + '\\n';
     }}
     const lines = pre.textContent.split('\\n');
     if (lines.length > MAX_LOG_LINES) {{

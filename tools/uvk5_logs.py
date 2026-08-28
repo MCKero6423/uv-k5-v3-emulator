@@ -22,12 +22,19 @@ class LogBuffer:
         self._lock = threading.Lock()
         self._seq = 0
 
-    def add(self, source: str, text: str):
+    def add(self, source: str, text: str, ip: str = None):
+        """Record one line. `ip` identifies the client that caused it.
+
+        The buffer is shared by every viewer, so without an attributed IP a log of
+        keypresses from two people is unreadable. Entries with no client behind
+        them -- firmware serial, QEMU stderr -- carry None.
+        """
         with self._lock:
             self._seq += 1
             self._entries.append({
                 "seq": self._seq,
                 "time": time.strftime("%H:%M:%S"),
+                "ip": ip,
                 "source": source,
                 "text": text,
             })
