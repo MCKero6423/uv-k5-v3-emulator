@@ -452,6 +452,27 @@ from a passing emulator test.
 Timing is also deliberately wrong — see the SysTick section in README.md. Fine
 for menus and control flow; useless for signal timing.
 
+**Serial receive does not work.** Transmit does — the firmware banner and its
+`printf` output reach stderr and the web UI log — but nothing can be sent *to* the
+firmware. Two things are missing, and both would need building:
+
+- USART1 is a `py32-stub` with no chardev backend, so there is no source of
+  incoming bytes.
+- `driver/uart.c` receives over DMA channel 2 in `LL_DMA_MODE_CIRCULAR` and finds
+  the write pointer with `sizeof(UART_DMA_Buffer) - LL_DMA_GetDataLength(...)`. The
+  DMA model only services SPI and never decrements `CNDTR` for USART, so that
+  expression is always 0 and the firmware sees an empty buffer. A channel sitting
+  permanently armed with `cndtr=256` and `cpar=0x40013804` is this, not a bug.
+
+What that costs: `UART_IsCommandAvailable` never fires, so the whole UV-K5
+programming protocol in `app/uart.c` is unreachable — `0x0514` handshake, `0x051B`
+EEPROM read, `0x051D` EEPROM write, `0x05DD` reset. CPS/CHIRP-style tools cannot
+talk to this emulator. Keypad, screen and the web UI are unaffected.
+
+Doing it properly means giving USART1 a real chardev, implementing circular-mode
+DMA with a decrementing `CNDTR`, and driving it from receive rather than from
+`TXDMAEN` as the SPI path does.
+
 ## If you add a peripheral
 
 1. Read the register layout from the CMSIS header

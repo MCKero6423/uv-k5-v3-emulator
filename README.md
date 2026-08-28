@@ -36,8 +36,11 @@ has no public datasheet, so its driver is the only specification available.
 | --- | --- |
 | Boot to main loop | works, ~5 s |
 | LCD contents | readable via `tools/screenshot.py` |
-| SPI flash, settings, calibration | works |
+| SPI flash, settings, calibration | works, and persists across power cycles |
+| Frequency entry | works, stored per band and kept |
 | Keypad and menu navigation | works, including waking from power save |
+| Serial output (firmware log) | works, appears in the web UI log |
+| Serial input / CPS programming | **not implemented**, see [AGENTS.md](AGENTS.md#what-this-cannot-do) |
 | Timing accuracy | deliberately wrong, see [Timing](#timing) |
 | Radio/RF behaviour | not modelled |
 
