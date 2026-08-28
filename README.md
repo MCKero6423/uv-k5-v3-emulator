@@ -67,6 +67,8 @@ keypresses silently stop working. Run the test after touching that code;
       armv7m_systick.*.patched  SysTick with the poll-boost property added
     assets/
       calibration.bin        512-byte dump from a real radio
+    deploy/                  nginx vhost for the HTTPS front end
+    docs/reverse-proxy.md    how https://k6v6.mckero.dn42/ is served
     docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
       keypad_test.py         keypad regression test, boots its own instance
@@ -187,8 +189,15 @@ Two constraints worth knowing before you use it:
 
 ### Reaching it from elsewhere
 
-`--host ::` makes it reachable off-box, which with no authentication means the
-port must be filtered by source address. `tools/dn42_firewall.sh` restricts it to
+The deployment here runs the server on loopback and puts nginx in front of it for
+TLS, at `https://k6v6.mckero.dn42/`. See
+[docs/reverse-proxy.md](docs/reverse-proxy.md) for the vhost, including the two
+settings that matter for this app: `proxy_buffering off` (or the frame stream
+arrives in bursts) and `X-Forwarded-For` (or every log line is attributed to
+127.0.0.1).
+
+Binding directly with `--host ::` also works, but with no authentication the port
+then has to be filtered by source address. `tools/dn42_firewall.sh` restricts it to
 DN42:
 
     tools/dn42_firewall.sh apply 8080     # DN42 + loopback only
