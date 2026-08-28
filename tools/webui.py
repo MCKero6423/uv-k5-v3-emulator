@@ -34,10 +34,16 @@ KEYPAD_PATH = "/machine/keypad"
 #   key_debounce_10ms     = 2  -> 20 ms to register a press
 #   key_repeat_delay_10ms = 40 -> 400 ms counts as HELD, a different event
 #
-# This is a property of the firmware, not a tunable. Keep it separate from the UI's
-# own hold threshold below.
-FIRMWARE_HELD_MS = 400
+# This is a property of the firmware, not a tunable.
 #
+# Past this point the firmware also auto-repeats, every key_repeat_10ms = 80 ms.
+# So a 500 ms press moving a menu cursor several steps is correct, not a bug: it is
+# what a real radio does when you hold the button that long. Measured: 500 ms moved
+# the cursor 3 steps, 800 ms moved 7, 1500 ms moved 15 -- all consistent with
+# (duration - 400) / 80. Do not try to suppress it in the UI; the fix for an
+# accidental repeat is a shorter press, not a filter that hides held events.
+FIRMWARE_HELD_MS = 400
+
 # The browser sends the duration it wants and the server holds the key for exactly
 # that long. It must not be reproduced by sending `down` and `up` as two requests:
 # over a slow link the round trip between them *becomes* the press duration.
@@ -46,41 +52,24 @@ FIRMWARE_HELD_MS = 400
 # MAIN_Key_MENU did nothing. Jitter either side of the threshold is what made it
 # look intermittent rather than simply broken.
 #
-# TAP_MS is latency the user pays directly, because the request does not return
-# until the hold finishes. So it is measured, not guessed: with 12 trials per
-# value, 20 ms registered only 5/12 times while 30 ms was 12/12. The nominal 20 ms
-# debounce is not enough on its own -- KEYBOARD_Poll samples each column 8 times
-# and wants 2 matching reads, so the real floor sits above it. 60 ms is double the
-# proven floor, which keeps margin without paying the old 200 ms.
-#
-# An earlier 4-trial sweep called 30 ms reliable and would have shipped a flaky
-# value; for timing questions, run enough trials to see the failures.
+# Default when a request omits hold_ms, i.e. for scripts and curl. The browser
+# always sends a measured duration, so this does not apply to normal use. Kept
+# short because the request does not return until the hold finishes, making the
+# value latency the caller pays directly. See MIN_HOLD_MS for why 60 ms.
 TAP_MS = 60
 
 # A hold longer than this is a stuck key or a typo, not intent.
 MAX_HOLD_MS = 5000
 
-# Long-press support under optimistic send.
+# Floor for a measured press. A very fast click can measure under the debounce
+# window, where the firmware would not register it at all.
 #
-# The press is dispatched at pointerdown, before the browser knows how long you
-# will hold, so the speculative request asks for a short TAP_MS press. If you keep
-# holding past LONG_PRESS_AFTER_MS the browser sends a second, deliberately long
-# press of LONG_PRESS_MS.
-#
-# LONG_PRESS_AFTER_MS is a UI decision and must NOT be set to the firmware's own
-# 400 ms boundary, even though that is where "held" begins. A deliberate click runs
-# 100-500 ms, so at 400 ms ordinary clicks sent tap *and* held, and the firmware
-# acted on both. Measured against the real firmware:
-#   held DOWN  auto-repeated, moving gMenuCursor 3 -> 12 from a single click
-#   held MENU  entered the submenu (gIsInSubMenu 0 -> 1)
-# which is what "UP/DOWN behaves like another MENU press" turned out to be.
-#
-# 900 ms is clear of any accidental click while still an obvious deliberate hold.
-LONG_PRESS_AFTER_MS = 900
-
-# The long press itself must clear the firmware's 400 ms threshold
-# (key_repeat_delay_10ms = 40) or it would land as another tap.
-LONG_PRESS_MS = 900
+# Measured, and the sample size mattered: at 12 trials per value, 20 ms registered
+# only 5/12 while 30 ms was 12/12. The nominal 20 ms debounce is not enough on its
+# own because KEYBOARD_Poll samples each column 8 times wanting 2 matching reads.
+# 60 ms is double the proven floor. An earlier 4-trial sweep called 30 ms reliable
+# and would have shipped a flaky value.
+MIN_HOLD_MS = 60
 
 # Lines kept in the browser's log pane. The pane is a fixed-height scroll box, so
 # older lines move up out of view; this caps the DOM behind it, which would
@@ -407,19 +396,16 @@ def render_index(scale: int) -> str:
     <summary>Logs (firmware serial, qemu, power)</summary>
     <pre id="logtext"></pre>
   </details>
-  <p class="hint">Keys are sent the moment you press, so a slow link does not
-  add the click duration to the delay. Keep holding past 400 ms for a long press,
-  which the firmware treats as a separate event. Arrows move, Enter is MENU,
-  Esc is EXIT, digits map straight through. No PTT button -- the keypad model
-  has no PTT line.</p>
+  <p class="hint">How long you hold a key is measured here and sent as one
+  number, so the firmware sees exactly the press you made. Hold past 400 ms for a
+  long press, which the firmware treats as a separate event and which repeats.
+  Arrows move, Enter is MENU, Esc is EXIT, digits map straight through. No PTT
+  button -- the keypad model has no PTT line.</p>
 </div>
 <script>
 const BINDINGS = {json.dumps(KEY_BINDINGS)};
-const TAP_MS = {TAP_MS};
-const LONG_PRESS_AFTER_MS = {LONG_PRESS_AFTER_MS};
-const LONG_PRESS_MS = {LONG_PRESS_MS};
+const MIN_HOLD_MS = {MIN_HOLD_MS};
 const pressedAt = new Map();
-const longTimers = new Map();
 
 async function sendKey(key, holdMs) {{
   try {{
@@ -438,36 +424,30 @@ function mark(key, on) {{
     .forEach(el => el.classList.toggle('active', on));
 }}
 
-// Fire at pointerdown, not at release. Latency is the thing worth optimising
-// here: waiting for pointerup leaves the network idle for the whole click, which
-// on a 400 ms link cost ~120 ms per key for nothing.
+// Measure the real press and send it once, on release.
 //
-// The duration is not known yet at this point, so the speculative request asks
-// for a short press. Holding past LONG_PRESS_AFTER_MS sends a second, long press,
-// which is how held events stay reachable.
-//
-// The duration still travels as a number rather than as two down/up requests: the
+// The duration travels as a number rather than as separate down/up requests: the
 // round trip between those would itself exceed the firmware's 400 ms held
-// threshold and turn every tap into a hold.
+// threshold, turning every tap into a hold.
+//
+// This deliberately waits for pointerup, which costs the click duration in
+// latency. An earlier version fired a speculative tap at pointerdown and a second
+// held press if the button was still down -- 152 ms faster, but it guessed, and a
+// wrong guess sent both presses. The firmware then acted on both: an ordinary
+// click in the menu moved gMenuCursor by 9 and opened the submenu. Measuring is
+// exact, and hold-to-repeat works because the key is held for as long as the user
+// actually holds it.
 function down(key) {{
   if (pressedAt.has(key)) return;
   pressedAt.set(key, performance.now());
   mark(key, true);
-  sendKey(key, TAP_MS);
-  longTimers.set(key, setTimeout(() => {{
-    // Still held, so the user meant a long press.
-    if (pressedAt.has(key)) sendKey(key, LONG_PRESS_MS);
-  }}, LONG_PRESS_AFTER_MS));
 }}
 function up(key) {{
-  if (!pressedAt.has(key)) return;
+  const started = pressedAt.get(key);
+  if (started === undefined) return;
   pressedAt.delete(key);
-  const timer = longTimers.get(key);
-  if (timer !== undefined) {{
-    clearTimeout(timer);
-    longTimers.delete(key);
-  }}
   mark(key, false);
+  sendKey(key, Math.max(performance.now() - started, MIN_HOLD_MS));
 }}
 
 document.querySelectorAll('.key').forEach(btn => {{

@@ -212,9 +212,9 @@ class TestFrontEndHoldMs(unittest.TestCase):
         self.assertNotIn("send(key, 'down')", self.body)
         self.assertNotIn("send(key, 'up')", self.body)
 
-    def test_uses_a_measured_tap_length(self):
-        """The tap length is a server-side constant, not a browser measurement."""
-        self.assertIn("TAP_MS", self.body)
+    def test_injects_the_minimum_hold(self):
+        """The floor is shared with the server so both agree on it."""
+        self.assertIn(f"MIN_HOLD_MS = {webui.MIN_HOLD_MS}", self.body)
 
 
 class TestStreamUsesPump(unittest.TestCase):
@@ -468,42 +468,49 @@ class TestStartsPoweredOff(unittest.TestCase):
         self.assertNotIn("supervisor.power_on()", src)
 
 
-class TestOptimisticSend(unittest.TestCase):
-    """The request must leave on pointerdown, not on release.
+class TestMeasuredSend(unittest.TestCase):
+    """The browser measures the real press and sends it once, on release.
 
-    Waiting for pointerup spends the whole click duration with the network idle:
-    on a 400 ms link a 120 ms click cost 650 ms click-to-visible instead of 530 ms,
-    because nothing was in flight while the button was down.
+    This replaces an optimistic scheme that fired a speculative tap at
+    pointerdown and a second held press if the button was still down. That was
+    152 ms faster but it *guessed*, and when the guess was wrong the firmware
+    received both presses and acted on both: a normal click in the menu moved
+    gMenuCursor by 9 and opened the submenu. Measuring is slower and exact, and
+    it makes hold-to-repeat work, since the firmware is held for as long as the
+    user actually holds.
     """
 
     def setUp(self):
         _, http = make_app()
         self.body = http.get("/").get_data(as_text=True)
 
-    def test_sends_from_pointerdown(self):
-        # down() must issue the request itself rather than only recording a time.
+    def test_measures_press_duration_in_the_browser(self):
+        self.assertIn("performance.now()", self.body)
+
+    def test_sends_on_release_not_on_press(self):
         down_fn = self.body.split("function down(key)")[1].split("function up(")[0]
-        self.assertIn("sendKey(", down_fn,
-                      "down() must fire the request immediately")
+        self.assertNotIn("sendKey(", down_fn,
+                         "down() must not send: the duration is not known yet")
+        up_fn = self.body.split("function up(key)")[1].split("\n}}")[0]
+        self.assertIn("sendKey(", up_fn, "up() is where the press is sent")
 
-    def test_up_does_not_send_the_press(self):
-        up_fn = self.body.split("function up(key)")[1].split("}")[0]
-        self.assertNotIn("sendKey(", up_fn,
-                         "up() must not be where the press is sent")
+    def test_sends_the_measured_duration(self):
+        self.assertIn("hold_ms", self.body)
 
-    def test_long_press_is_still_reachable(self):
-        """Holding must still produce a held event, or long-press breaks."""
-        self.assertIn("LONG_PRESS_MS", self.body)
-        self.assertIn("LONG_PRESS_AFTER_MS", self.body)
+    def test_does_not_speculate_with_a_second_press(self):
+        """No timer may fire a second press behind the user's back."""
+        self.assertNotIn("LONG_PRESS_AFTER_MS", self.body)
+        self.assertNotIn("longTimers", self.body)
 
-    def test_long_press_threshold_is_past_the_firmware_boundary(self):
-        """Must exceed 400 ms or the firmware will not call it held."""
-        self.assertGreater(webui.LONG_PRESS_MS, 400)
-        self.assertGreaterEqual(webui.LONG_PRESS_AFTER_MS, 400)
+    def test_enforces_a_minimum_hold(self):
+        """A very fast click must still clear the debounce floor."""
+        self.assertIn("MIN_HOLD_MS", self.body)
+        self.assertGreaterEqual(webui.MIN_HOLD_MS, 30)
 
-    def test_optimistic_hold_is_a_short_press(self):
-        """The speculative press must stay under the held threshold."""
-        self.assertLess(webui.TAP_MS, 400)
+    def test_does_not_send_separate_down_and_up_for_taps(self):
+        """Two requests would put the round trip inside the press duration."""
+        self.assertNotIn("send(key, 'down')", self.body)
+        self.assertNotIn("send(key, 'up')", self.body)
 
 
 class TestLogsEndpoint(unittest.TestCase):
@@ -598,36 +605,6 @@ class TestIdleKeepalive(unittest.TestCase):
     def test_keepalive_is_slower_than_the_live_rate(self):
         """Slower on idle, but never stopped."""
         self.assertGreater(webui.IDLE_FRAME_INTERVAL_S, 1.0 / webui.TARGET_FPS)
-
-
-class TestLongPressThresholdIsNotTrippedByNormalClicks(unittest.TestCase):
-    """A deliberate click must not be promoted to a long press.
-
-    Reproduced against the real firmware: optimistic send fires a tap at
-    pointerdown and a held press if the button is still down at the threshold. With
-    the threshold at the firmware's own 400 ms boundary, an ordinary click sent
-    BOTH, and the firmware acted on both --
-      held DOWN  auto-repeated, moving gMenuCursor 3 -> 12 in one click
-      held MENU  entered the submenu (gIsInSubMenu 0 -> 1)
-    which is exactly the reported "UP/DOWN acts like another MENU press".
-    """
-
-    def test_ui_threshold_is_well_above_a_human_click(self):
-        # Deliberate clicks run 100-500 ms. The UI threshold must sit clear of
-        # that range, not at the firmware's 400 ms event boundary.
-        self.assertGreaterEqual(webui.LONG_PRESS_AFTER_MS, 700)
-
-    def test_ui_threshold_is_above_the_firmware_boundary(self):
-        """Still needs to be past 400 ms, or the long press is not 'held'."""
-        self.assertGreater(webui.LONG_PRESS_AFTER_MS, 400)
-
-    def test_long_press_duration_clears_the_firmware_boundary(self):
-        self.assertGreater(webui.LONG_PRESS_MS, 400)
-
-    def test_page_requires_an_intentional_hold(self):
-        _, http = make_app()
-        body = http.get("/").get_data(as_text=True)
-        self.assertIn(f"LONG_PRESS_AFTER_MS = {webui.LONG_PRESS_AFTER_MS}", body)
 
 
 if __name__ == "__main__":
