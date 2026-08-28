@@ -1273,15 +1273,73 @@ struct PY32StubState {
     uint32_t     regs[0x100];
 };
 
+/* USART_SR transmit flags, from the vendor header: TXE is bit 7, TC bit 6. */
+#define PY32_USART_SR_TC   (1u << 6)
+#define PY32_USART_SR_TXE  (1u << 7)
+
 static uint64_t py32_stub_read(void *opaque, hwaddr addr, unsigned size)
 {
     PY32StubState *s = opaque;
     const unsigned idx = addr >> 2;
-    const uint32_t value = idx < ARRAY_SIZE(s->regs) ? s->regs[idx] : 0;
+    uint32_t value = idx < ARRAY_SIZE(s->regs) ? s->regs[idx] : 0;
+
+    /*
+     * USART1 SR must report the transmitter as ready, or the firmware discards
+     * everything it tries to print.
+     *
+     * UART_Send() in App/driver/uart.c spins on LL_USART_IsActiveFlag_TXE() with
+     * a bounded timeout and *skips the byte* when the flag never sets. A stub
+     * that returns 0 for SR therefore silently loses all serial output: the only
+     * write reaching DR is UART_Init()'s priming zero. Reporting TXE|TC keeps the
+     * transmitter permanently ready, which is exactly right for a model that
+     * consumes bytes instantly.
+     */
+    if (addr == 0x00 && s->stub_name && !strcmp(s->stub_name, "usart1")) {
+        value |= PY32_USART_SR_TXE | PY32_USART_SR_TC;
+    }
 
     qemu_log_mask(LOG_UNIMP, "py32-%s: read 0x%03" HWADDR_PRIx " -> 0x%08x\n",
                   s->stub_name ?: "stub", addr, value);
     return value;
+}
+
+/*
+ * USART1 DR is the firmware's log output, so print it rather than dropping it.
+ *
+ * App/driver/uart.c drives USART1 at 38400 baud through UART_Send(), Main() sends
+ * UART_Version at boot, and _putchar() routes every printf_ there. USART1 has no
+ * real model here -- it is one of the logging catch-alls below -- so without this
+ * the bytes vanish and the firmware appears to print nothing at all.
+ *
+ * DR is at +0x04: the vendor CMSIS header (py32f071xB.h) lays USART_TypeDef out as
+ * SR at +0x00 then DR at +0x04. Buffered into a line so the output is readable
+ * instead of one message per character.
+ */
+static void py32_stub_serial_byte(char ch)
+{
+    static char line[256];
+    static unsigned len;
+
+    /*
+     * Drop NULs rather than buffering them. UART_Init() primes the transmitter
+     * with LL_USART_TransmitData8(USARTx, 0), so the very first byte of the
+     * session is 0x00; storing it made fprintf("%s") stop right there and print
+     * an empty line, even though the 46 bytes of UART_Version arrived fine.
+     */
+    if (ch == '\0') {
+        return;
+    }
+    /* Flush on either terminator: the firmware sends CRLF, and a lone CR should
+     * not hold a finished line hostage. */
+    if (ch == '\n' || ch == '\r' || len >= sizeof(line) - 1) {
+        line[len] = '\0';
+        if (len > 0) {
+            fprintf(stderr, "SERIAL %s\n", line);
+        }
+        len = 0;
+        return;
+    }
+    line[len++] = ch;
 }
 
 static void py32_stub_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
@@ -1291,6 +1349,9 @@ static void py32_stub_write(void *opaque, hwaddr addr, uint64_t value, unsigned 
 
     if (idx < ARRAY_SIZE(s->regs)) {
         s->regs[idx] = value;
+    }
+    if (addr == 0x04 && s->stub_name && !strcmp(s->stub_name, "usart1")) {
+        py32_stub_serial_byte((char)(value & 0xff));
     }
     qemu_log_mask(LOG_UNIMP, "py32-%s: write 0x%03" HWADDR_PRIx " = 0x%08" PRIx64 "\n",
                   s->stub_name ?: "stub", addr, value);
