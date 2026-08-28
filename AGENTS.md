@@ -459,6 +459,29 @@ Two constraints are not negotiable, both from untimed spin loops in the firmware
   measuring. Not hypothetical: the first test run decoded 48 registers correctly and
   still reported RSSI as 0 for precisely this reason.
 
+### The squelch interrupt: attempted, backed out
+
+Scanning works — long-press `*` and the frequency really does step, 6 distinct frames
+over 7 seconds — but the S-meter never appears, because `ui/main.c:2370` only draws it
+when `FUNCTION_IsRx()`, and that needs `gCurrentFunction` to be in a receiving state.
+Reaching it means the chip reporting a squelch opening, not just a healthy RSSI.
+
+The mechanism is clear enough: `REG_0C` bit 0 says an interrupt is pending, the
+firmware writes `REG_02` to acknowledge and reads it back for the flags, and
+`sqlFound` is bit 3 (the bitfield is spelled out at `app/app.c:915`).
+
+I implemented it — raise `sqlFound` once when the firmware enables interrupts — and
+**backed it out**. The guest kept running, but `REG_0C` bit 0 was still set afterwards:
+the firmware had not collected the interrupt. That is a latent hang, because
+`app/app.c:910` and `:1417` spin on that bit with no timeout, so any path that reaches
+them with the bit stuck never returns. Shipping a model that leaves a hang armed is
+worse than shipping one without an S-meter.
+
+Anyone retrying should first work out *why* the flag was not collected — a gate
+upstream of the interrupt loop, or ordering against the receive state machine — rather
+than raising it at a different moment and hoping. The signal that it is right is
+`REG_0C` reading 0 afterwards, which `tools/test_bk4819.py` already asserts.
+
 **Where it stops.** This models the register interface, not the radio. It reproduces
 what the firmware *commanded* — frequency, power step, carrier keying in time — never
 the analogue result: keying envelopes, spurious emissions, sensitivity.
