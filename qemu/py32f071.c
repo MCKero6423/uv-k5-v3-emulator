@@ -684,28 +684,30 @@ static void py32_spi_write(void *opaque, hwaddr addr, uint64_t value, unsigned s
     PY32SpiState *s = opaque;
 
     switch (addr) {
+    /*
+     * A DMA-driven transfer starts only once SPE and TXDMAEN are both set.
+     *
+     * TXDMAEN specifically, not "either direction": TX is what clocks the bus, so
+     * it is the gate. Both driver paths set it last:
+     *
+     *     arm RX, arm TX, RXDMAEN, SPE, TXDMAEN
+     *
+     * Starting at SPE, when only RXDMAEN was set, ran the whole transfer while the
+     * TX channel was armed but not yet requesting. On the sector write-back that
+     * meant sending 4096 bytes read from BlackHole (0x200003D4, four zero bytes,
+     * no address increment) instead of SectorCache (0x200003D8), so the sector was
+     * programmed with zeros -- wiping the per-band VFO frequencies at 0x9000 and
+     * with them any frequency the user typed.
+     */
     case SPI_CR1:
         s->cr1 = value;
-        /*
-         * SPE can be the last thing enabled. The flash driver's read path arms both
-         * channels, sets RXDMAEN, enables SPI, then sets TXDMAEN -- but the write
-         * path enables SPI last, so both orders have to work.
-         */
-        if ((value & SPI_CR1_SPE) && (s->cr2 & (SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN))
-            && s->dma_kick) {
+        if ((value & SPI_CR1_SPE) && (s->cr2 & SPI_CR2_TXDMAEN) && s->dma_kick) {
             s->dma_kick(s->dma, s);
         }
         break;
     case SPI_CR2:
         s->cr2 = value;
-        /*
-         * A DMA request is what actually starts the transfer on hardware. Kick the
-         * armed channels here rather than when they were enabled: at arm time the
-         * read command has not been clocked out yet, so the reply would be read
-         * before the device had anything to say.
-         */
-        if ((value & (SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN))
-            && (s->cr1 & SPI_CR1_SPE) && s->dma_kick) {
+        if ((value & SPI_CR2_TXDMAEN) && (s->cr1 & SPI_CR1_SPE) && s->dma_kick) {
             s->dma_kick(s->dma, s);
         }
         break;
@@ -833,6 +835,25 @@ struct PY32DmaState {
 
     /* Set by the SoC: lets the DMA clock bytes through an SPI controller. */
     PY32SpiState *spi[2];
+
+    /*
+     * The address space DMA transfers move bytes through.
+     *
+     * Must be the CPU's, not address_space_memory. This SoC builds its own
+     * container region and hands that to the ARMv7M core, and never registers it
+     * with the global system memory, so address_space_memory cannot decode SRAM at
+     * all: reads returned MEMTX_DECODE_ERROR with all-zero data and writes went
+     * nowhere.
+     *
+     * That single mistake accounted for every "flash forgets things" symptom.
+     * PY25Q16_WriteBuffer reads a 4 KB sector into SectorCache, patches it, and
+     * programs the whole sector back. The read appeared to work -- the model
+     * returned real 0xFF bytes -- but DMA dropped them on the floor, so the
+     * write-back sourced 4096 zeros and cleared the sector, VFO frequencies at
+     * 0x9000 included. Hence a typed frequency reverting to 18 MHz, which is
+     * simply BX4819_band1_lower after RADIO_ConfigureChannel read a zero.
+     */
+    AddressSpace *as;
 };
 
 static void py32_dma_update_irq(PY32DmaState *s)
@@ -882,8 +903,14 @@ static PY32SpiState *py32_dma_spi_for(PY32DmaState *s, uint32_t paddr)
  */
 static void py32_dma_run_for_spi(PY32DmaState *s, PY32SpiState *spi)
 {
-    AddressSpace *as = &address_space_memory;
+    AddressSpace *as = s->as;
     int tx = -1, rx = -1;
+
+    if (!as) {
+        /* Fail loudly rather than silently transferring zeros. */
+        qemu_log_mask(LOG_GUEST_ERROR, "py32-dma: no address space configured\n");
+        return;
+    }
 
     for (int ch = 0; ch < PY32_DMA_CHANNELS; ch++) {
         PY32DmaChannel *c = &s->ch[ch];
@@ -1596,6 +1623,8 @@ struct PY32F071State {
     MemoryRegion sram;
     MemoryRegion *board_memory;
     MemoryRegion container;
+    /* An address space over `container`, so DMA sees the same map as the CPU. */
+    AddressSpace dma_as;
 };
 
 /* Peripherals covered by the catch-all, in map order. */
@@ -1736,6 +1765,15 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
         s->spi[i].dma = &s->dma;
         s->spi[i].dma_kick = py32_dma_kick;
     }
+
+    /*
+     * DMA must move bytes through the CPU's address space. The container above is
+     * this SoC's whole memory map and is given only to the core, so the global
+     * address_space_memory cannot see SRAM -- reads through it fail with
+     * MEMTX_DECODE_ERROR and yield zeros.
+     */
+    s->dma.as = &s->dma_as;
+    address_space_init(&s->dma_as, &s->container, "py32f071-dma");
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->dma), errp)) {
         return;
     }
