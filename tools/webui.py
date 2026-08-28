@@ -25,6 +25,7 @@ import time
 from flask import Flask, Response, jsonify, request
 
 from uvk5_keys import KEYS, is_valid, normalise
+from uvk5_logs import LogBuffer
 from uvk5_stream import FramePump
 
 KEYPAD_PATH = "/machine/keypad"
@@ -67,6 +68,11 @@ MAX_HOLD_MS = 5000
 LONG_PRESS_AFTER_MS = 400
 LONG_PRESS_MS = 900
 
+# Lines kept in the browser's log pane. The pane is a fixed-height scroll box, so
+# older lines move up out of view; this caps the DOM behind it, which would
+# otherwise grow all session even though only a screenful is visible.
+MAX_LOG_LINES = 500
+
 BOUNDARY = "uvk5frame"
 TARGET_FPS = 15
 
@@ -94,8 +100,12 @@ POWER_ACTIONS = ("on", "off", "reset", "pause", "resume")
 
 
 def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
-               supervisor=None):
+               supervisor=None, log=None):
     app = Flask(__name__)
+
+    if log is None:
+        log = LogBuffer()
+    app.config["LOG"] = log
 
     # One background grabber for every client. client may be None: the emulator
     # can be powered off, and the page still has to load.
@@ -135,6 +145,11 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
             # The emulator can die under us; that is a state to report, not a 500.
             return jsonify(powered=False, status="unreachable", error=str(exc))
         return jsonify(powered=True, **info)
+
+    @app.get("/api/logs")
+    def api_logs():
+        since = request.args.get("since", type=int, default=0)
+        return jsonify(entries=log.entries(since=since), cursor=log.cursor())
 
     @app.post("/api/power/<action>")
     def api_power(action):
@@ -312,6 +327,19 @@ def render_index(scale: int) -> str:
   #powerstate.on {{ color:#3fb950; }}
   /* Powered off is a dark panel, not a frozen last frame. */
   .screen-off {{ background:#0b0d10 !important; }}
+  #logpane {{ align-self:stretch; }}
+  #logpane summary {{ font-size:12px; color:#6e7681; cursor:pointer;
+                     user-select:none; }}
+  /*
+   * Fixed height, so the box never grows with content: older lines move up out
+   * of view and you scroll back to read them. min-height matches height so a
+   * nearly empty pane does not jump around as the first lines arrive.
+   */
+  #logtext {{ height:180px; min-height:180px; overflow-y:auto; margin:6px 0 0;
+             padding:8px; background:#0d1117; border:1px solid #2d333b;
+             border-radius:6px; white-space:pre-wrap; word-break:break-all;
+             font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+             color:#8b949e; }}
 </style>
 </head><body>
 <div class="radio">
@@ -328,9 +356,13 @@ def render_index(scale: int) -> str:
     <div class="pad">{grid}</div>
   </div>
   <div id="status">connecting...</div>
-  <p class="hint">How long you hold a key is measured here and sent as a number,
-  so a slow link cannot turn a tap into a long press. Over 400 ms the firmware
-  treats it as held, which is a different event. Arrows move, Enter is MENU,
+  <details id="logpane" open>
+    <summary>Logs (firmware serial, qemu, power)</summary>
+    <pre id="logtext"></pre>
+  </details>
+  <p class="hint">Keys are sent the moment you press, so a slow link does not
+  add the click duration to the delay. Keep holding past 400 ms for a long press,
+  which the firmware treats as a separate event. Arrows move, Enter is MENU,
   Esc is EXIT, digits map straight through. No PTT button -- the keypad model
   has no PTT line.</p>
 </div>
@@ -468,6 +500,39 @@ async function poll() {{
 }}
 poll();
 setInterval(poll, 3000);
+
+// Cap the DOM as well as the server-side buffer. The pane scrolls, but an
+// unbounded <pre> would still grow memory over a long session.
+const MAX_LOG_LINES = {MAX_LOG_LINES};
+let logCursor = 0;
+
+async function pollLogs() {{
+  const pre = document.getElementById('logtext');
+  try {{
+    const r = await fetch('/api/logs?since=' + logCursor);
+    const j = await r.json();
+    logCursor = j.cursor;
+    if (!j.entries.length) return;
+
+    // Only stick to the bottom if the user is already there. Otherwise a new
+    // line would yank the view away from whatever they scrolled up to read.
+    const atBottom =
+      pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+
+    for (const e of j.entries) {{
+      pre.textContent += e.time + ' [' + e.source + '] ' + e.text + '\\n';
+    }}
+    const lines = pre.textContent.split('\\n');
+    if (lines.length > MAX_LOG_LINES) {{
+      pre.textContent = lines.slice(-MAX_LOG_LINES).join('\\n');
+    }}
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  }} catch (err) {{
+    /* leave the pane as it is; the next poll will catch up */
+  }}
+}}
+pollLogs();
+setInterval(pollLogs, 2000);
 </script>
 </body></html>"""
 
@@ -504,10 +569,13 @@ def main() -> int:
             raise RuntimeError(f"QMP socket never appeared at {args.qmp}")
         return QmpClient(args.qmp)
 
+    # One buffer shared by the supervisor and the HTTP layer, so power events,
+    # QEMU stderr and firmware serial all land in the same place.
+    log = LogBuffer()
     supervisor = Supervisor(
         launch=default_launcher(args.qemu, args.flash, args.elf, args.qmp,
                                 gdb_port=args.gdb_port),
-        connect=connect)
+        connect=connect, log=log)
 
     if args.attach:
         # Someone else owns the process; adopt it so the screen works, but Off
@@ -517,7 +585,7 @@ def main() -> int:
     # page behaves like walking up to a machine rather than finding it booted.
 
     app = create_app(supervisor.client(), args.frame_addr, args.status_addr,
-                     args.scale, supervisor=supervisor)
+                     args.scale, supervisor=supervisor, log=log)
     print(f"serving on http://{args.host}:{args.port}/")
     print("attached to a running emulator" if args.attach
           else "emulator is OFF; press On in the browser to boot it")

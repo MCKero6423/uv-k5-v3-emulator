@@ -154,5 +154,47 @@ class TestSupervisor(unittest.TestCase):
         self.assertTrue(self.sup.owns_process())
 
 
+class TestSupervisorLogging(unittest.TestCase):
+    def setUp(self):
+        from uvk5_logs import LogBuffer
+        self.log = LogBuffer(capacity=50)
+        self.procs = []
+
+        def launch():
+            proc = FakeProc()
+            self.procs.append(proc)
+            return proc
+
+        self.sup = Supervisor(launch=launch, connect=FakeClient, log=self.log)
+
+    def texts(self):
+        return [e["text"].lower() for e in self.log.entries()]
+
+    def test_power_on_is_logged(self):
+        self.sup.power_on()
+        self.assertTrue(any("power on" in t for t in self.texts()), self.texts())
+
+    def test_power_off_is_logged(self):
+        self.sup.power_on()
+        self.sup.power_off()
+        self.assertTrue(any("power off" in t for t in self.texts()), self.texts())
+
+    def test_reset_is_logged(self):
+        self.sup.power_on()
+        self.sup.reset()
+        self.assertTrue(any("reset" in t for t in self.texts()), self.texts())
+
+    def test_events_are_tagged_as_power(self):
+        self.sup.power_on()
+        self.assertTrue(any(e["source"] == "power"
+                            for e in self.log.entries()))
+
+    def test_works_without_a_log(self):
+        """The log is optional; a supervisor with none must not crash."""
+        sup = Supervisor(launch=lambda: FakeProc(), connect=FakeClient)
+        sup.power_on()
+        sup.power_off()
+
+
 if __name__ == "__main__":
     unittest.main()

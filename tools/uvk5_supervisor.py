@@ -23,7 +23,7 @@ DEFAULT_QMP = "/tmp/uvk5-qmp.sock"
 
 def default_launcher(qemu: str, flash: str, elf: str,
                      qmp_path: str = DEFAULT_QMP, gdb_port: int = 1234,
-                     capture_stderr: bool = False):
+                     capture_stderr: bool = True):
     """Reproduces the command line in tools/run.sh."""
     def launch():
         # A stale socket makes QEMU fail to bind, which looks like "power on did
@@ -50,12 +50,18 @@ def wait_for_socket(path: str, timeout: float = 15.0) -> bool:
 
 
 class Supervisor:
-    def __init__(self, launch, connect):
+    def __init__(self, launch, connect, log=None):
         self._launch = launch
         self._connect = connect
+        self._log = log
         self._lock = threading.Lock()
         self._proc = None
         self._client = None
+
+    def _note(self, text: str):
+        """Record a power event, if anyone is collecting them."""
+        if self._log is not None:
+            self._log.add("power", text)
 
     def is_running(self) -> bool:
         with self._lock:
@@ -91,7 +97,15 @@ class Supervisor:
                 return False
             self._proc = self._launch()
             self._client = self._connect()
-            return True
+            proc = self._proc
+        self._note("power on")
+        # Forward QEMU's own stderr, which run.sh and the tests used to discard.
+        # Firmware serial arrives here too, tagged SERIAL by the machine model.
+        if self._log is not None and getattr(proc, "stderr", None) is not None:
+            threading.Thread(
+                target=self._log.pump_stream, args=(proc.stderr,),
+                kwargs={"default_source": "qemu"}, daemon=True).start()
+        return True
 
     def power_off(self) -> bool:
         with self._lock:
@@ -108,15 +122,18 @@ class Supervisor:
             client.close()
         except Exception:
             pass
+        code = None
         if proc is not None:
             try:
-                proc.wait(timeout=10)
+                code = proc.wait(timeout=10)
             except Exception:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
+                    code = proc.wait(timeout=5)
                 except Exception:
                     proc.kill()
+        self._note("power off" if code in (None, 0)
+                   else f"power off (qemu exited with {code})")
         return True
 
     def reset(self) -> bool:
@@ -125,6 +142,7 @@ class Supervisor:
         if client is None:
             return self.power_on()
         client.command("system_reset")
+        self._note("reset")
         return True
 
     def pause(self) -> bool:

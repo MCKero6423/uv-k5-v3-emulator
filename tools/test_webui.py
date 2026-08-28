@@ -506,5 +506,53 @@ class TestOptimisticSend(unittest.TestCase):
         self.assertLess(webui.TAP_MS, 400)
 
 
+class TestLogsEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.client, self.http = make_app()
+
+    def test_logs_endpoint_returns_entries(self):
+        resp = self.http.get("/api/logs")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertIn("entries", body)
+        self.assertIn("cursor", body)
+
+    def test_logs_accept_a_since_cursor(self):
+        resp = self.http.get("/api/logs?since=0")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_logs_exposes_the_buffer(self):
+        _, sup, http = make_supervised()
+        app_log = http.application.config.get("LOG")
+        self.assertIsNotNone(app_log)
+
+
+class TestLogPane(unittest.TestCase):
+    def setUp(self):
+        _, http = make_app()
+        self.body = http.get("/").get_data(as_text=True)
+
+    def test_page_has_a_log_pane(self):
+        self.assertIn('id="logpane"', self.body)
+        self.assertIn("/api/logs", self.body)
+
+    def test_pane_has_a_fixed_height(self):
+        """The container must not grow with content."""
+        self.assertIn("#logtext", self.body)
+        self.assertIn("height:", self.body)
+
+    def test_pane_scrolls_rather_than_expanding(self):
+        self.assertIn("overflow-y:auto", self.body)
+
+    def test_pane_is_capped_in_line_count(self):
+        """Even a scrollable pane needs a cap, or the DOM grows forever."""
+        self.assertIn("MAX_LOG_LINES", self.body)
+
+    def test_autoscroll_yields_to_manual_scrolling(self):
+        """Scrolling up to read must not be yanked back by the next line."""
+        self.assertIn("scrollHeight", self.body)
+        self.assertIn("clientHeight", self.body)
+
+
 if __name__ == "__main__":
     unittest.main()
