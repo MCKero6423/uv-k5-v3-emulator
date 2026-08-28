@@ -1008,7 +1008,23 @@ struct PY25Q16State {
     uint32_t addr;
     unsigned phase;      /* bytes consumed since the command byte */
     bool     write_enabled;
+
+    /*
+     * Writes have to reach the backing file or nothing the firmware saves
+     * survives: settings, edited frequencies and channel data all live here, and
+     * on real hardware this is a physical part that keeps its contents with the
+     * power off.
+     *
+     * Flushing on every programmed byte would mean thousands of writes for one
+     * settings save, so a dirty flag is set here and the image is written out
+     * when the chip is deselected -- by which point the firmware's driver has
+     * finished the whole erase-and-program sequence.
+     */
+    bool     dirty;
+    Notifier exit_notifier;
 };
+
+static void py25q16_exit_notify(Notifier *n, void *data);
 
 static uint8_t py25q16_xfer(void *opaque, uint8_t out)
 {
@@ -1049,6 +1065,7 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
         if (s->write_enabled) {
             /* NOR can only clear bits without an erase. */
             s->data[s->addr % PY25Q16_SIZE] &= out;
+            s->dirty = true;
         }
         s->addr++;
         return 0xff;
@@ -1059,6 +1076,7 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
             if (s->phase == 3 && s->write_enabled) {
                 const uint32_t sector = (s->addr / 0x1000) * 0x1000;
                 memset(s->data + (sector % PY25Q16_SIZE), 0xff, 0x1000);
+                s->dirty = true;
             }
         }
         return 0xff;
@@ -1082,6 +1100,51 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
     }
 }
 
+/*
+ * Write the image back to its file.
+ *
+ * Whole-file rather than a partial update: 2 MB is nothing on a host, and the
+ * alternative means tracking which sectors changed, which is more code and more to
+ * get wrong for no benefit here.
+ *
+ * Via a temporary file and rename so an interrupted flush cannot leave a truncated
+ * image behind -- the file is the only copy of the radio's settings, and losing it
+ * to a half-finished write would be worse than not persisting at all.
+ */
+static void py25q16_flush(PY25Q16State *s)
+{
+    char *tmp_path;
+    FILE *fh;
+
+    if (!s->dirty || !s->image_path || !*s->image_path) {
+        return;
+    }
+
+    tmp_path = g_strdup_printf("%s.tmp", s->image_path);
+    fh = fopen(tmp_path, "wb");
+    if (!fh) {
+        warn_report("py25q16: cannot write %s, changes will be lost", tmp_path);
+        g_free(tmp_path);
+        return;
+    }
+    if (fwrite(s->data, 1, PY25Q16_SIZE, fh) != PY25Q16_SIZE) {
+        warn_report("py25q16: short write to %s, keeping the previous image",
+                    tmp_path);
+        fclose(fh);
+        unlink(tmp_path);
+        g_free(tmp_path);
+        return;
+    }
+    fclose(fh);
+    if (rename(tmp_path, s->image_path) != 0) {
+        warn_report("py25q16: cannot replace %s", s->image_path);
+        unlink(tmp_path);
+    } else {
+        s->dirty = false;
+    }
+    g_free(tmp_path);
+}
+
 /* Chip select is active low. */
 static void py25q16_set_cs(void *opaque, int line, int level)
 {
@@ -1092,6 +1155,12 @@ static void py25q16_set_cs(void *opaque, int line, int level)
         /* Deselect ends the command. */
         s->cmd = PY25Q16_CMD_NONE;
         s->phase = 0;
+        /*
+         * Flush here rather than per byte. The firmware's driver holds CS for a
+         * whole erase-and-program sequence, so this is once per settings save
+         * instead of once per programmed byte.
+         */
+        py25q16_flush(s);
     }
     s->selected = selected;
 }
@@ -1116,6 +1185,19 @@ static void py25q16_realize(DeviceState *dev, Error **errp)
     }
 
     qdev_init_gpio_in_named(dev, py25q16_set_cs, "cs", 1);
+
+    /*
+     * Also flush at exit. Deselect covers the normal case, but QMP `quit` -- which
+     * is what the web UI's power off sends -- can arrive with the chip still
+     * selected, and the last write would be dropped.
+     */
+    s->exit_notifier.notify = py25q16_exit_notify;
+    qemu_add_exit_notifier(&s->exit_notifier);
+}
+
+static void py25q16_exit_notify(Notifier *n, void *data)
+{
+    py25q16_flush(container_of(n, PY25Q16State, exit_notifier));
 }
 
 static Property py25q16_properties[] = {
