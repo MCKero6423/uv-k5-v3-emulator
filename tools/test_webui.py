@@ -137,16 +137,6 @@ class TestFrontEnd(unittest.TestCase):
         for key in webui.KEYS:
             self.assertIn(f'data-key="{key}"', self.body)
 
-    def test_sends_down_and_up_not_just_tap(self):
-        """Real press duration must come from the browser.
-
-        The firmware distinguishes a short press from a held key at 400 ms, so
-        the front end has to send the two edges separately rather than asking the
-        server for a fixed-length tap.
-        """
-        self.assertIn("send(key, 'down')", self.body)
-        self.assertIn("send(key, 'up')", self.body)
-
     def test_binds_pointer_and_keyboard_input(self):
         self.assertIn("pointerdown", self.body)
         self.assertIn("keydown", self.body)
@@ -205,6 +195,29 @@ class TestHoldMs(unittest.TestCase):
         """A deliberate long press must stay long, or hold events break."""
         resp = self.http.post("/api/key", json={"key": "MENU", "hold_ms": 900})
         self.assertEqual(resp.get_json()["hold_ms"], 900)
+
+
+class TestFrontEndHoldMs(unittest.TestCase):
+    """The page must send one request per key, carrying a measured duration."""
+
+    def setUp(self):
+        _, http = make_app()
+        self.body = http.get("/").get_data(as_text=True)
+
+    def test_sends_hold_ms(self):
+        self.assertIn("hold_ms", self.body)
+
+    def test_measures_press_duration_in_the_browser(self):
+        self.assertIn("performance.now()", self.body)
+
+    def test_does_not_send_separate_down_and_up_for_taps(self):
+        """Two requests per key double the latency and break at 400 ms RTT."""
+        self.assertNotIn("send(key, 'down')", self.body)
+        self.assertNotIn("send(key, 'up')", self.body)
+
+    def test_enforces_a_minimum_hold(self):
+        """A very fast click still has to clear the 20 ms debounce."""
+        self.assertIn("MIN_HOLD_MS", self.body)
 
 
 if __name__ == "__main__":

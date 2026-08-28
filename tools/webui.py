@@ -218,21 +218,23 @@ def render_index(scale: int) -> str:
     <div class="pad">{grid}</div>
   </div>
   <div id="status">connecting...</div>
-  <p class="hint">Hold a key to send a long press: over 400 ms the firmware
+  <p class="hint">How long you hold a key is measured here and sent as a number,
+  so a slow link cannot turn a tap into a long press. Over 400 ms the firmware
   treats it as held, which is a different event. Arrows move, Enter is MENU,
   Esc is EXIT, digits map straight through. No PTT button -- the keypad model
   has no PTT line.</p>
 </div>
 <script>
 const BINDINGS = {json.dumps(KEY_BINDINGS)};
-const held = new Set();
+const MIN_HOLD_MS = {MIN_HOLD_MS};
+const pressedAt = new Map();
 
-async function send(key, action) {{
+async function sendKey(key, holdMs) {{
   try {{
     await fetch('/api/key', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{key: key, action: action}})
+      body: JSON.stringify({{key: key, hold_ms: Math.round(holdMs)}})
     }});
   }} catch (err) {{
     document.getElementById('status').textContent = 'send failed: ' + err;
@@ -244,18 +246,21 @@ function mark(key, on) {{
     .forEach(el => el.classList.toggle('active', on));
 }}
 
-// Press duration is decided by the browser, not the server.
+// One request per key, carrying the duration as a number. Sending 'down' and
+// 'up' as two requests would put the network round trip inside the press: at
+// 400 ms RTT every tap arrived as a ~407 ms hold, which the firmware dispatches
+// as a held key and MAIN_Key_MENU ignores.
 function down(key) {{
-  if (held.has(key)) return;
-  held.add(key);
+  if (pressedAt.has(key)) return;
+  pressedAt.set(key, performance.now());
   mark(key, true);
-  send(key, 'down');
 }}
 function up(key) {{
-  if (!held.has(key)) return;
-  held.delete(key);
+  const started = pressedAt.get(key);
+  if (started === undefined) return;
+  pressedAt.delete(key);
   mark(key, false);
-  send(key, 'up');
+  sendKey(key, Math.max(performance.now() - started, MIN_HOLD_MS));
 }}
 
 document.querySelectorAll('.key').forEach(btn => {{
@@ -281,7 +286,7 @@ addEventListener('keyup', ev => {{
 }});
 // Release on blur, so losing focus mid-press cannot leave a key stuck down.
 addEventListener('blur', () => {{
-  [...held].forEach(up);
+  [...pressedAt.keys()].forEach(up);
   fetch('/api/release-all', {{method: 'POST'}}).catch(() => {{}});
 }});
 
