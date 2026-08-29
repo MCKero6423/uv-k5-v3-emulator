@@ -13,7 +13,8 @@ What is checked:
   3. every internal .md link resolves
   4. the English/Chinese pairs have matching section structure
   5. memory-map addresses match the model's #defines
-  6. firmware file:line references point at what the docs say they do
+  6. every long flag a doc passes to a tool exists in that tool
+  7. firmware file:line references point at what the docs say they do
 
 Run it after touching docs or renaming anything:
 
@@ -147,6 +148,37 @@ def check_memory_map():
             fail(f"docs say {sym} is {documented}, model says {m.group(1)}")
 
 
+def check_documented_flags():
+    """Every long flag a doc attributes to a tool must exist in that tool.
+
+    A renamed or removed option is the classic form of command rot, and it is the one
+    that wastes a reader's time most directly: they paste the line and it fails.
+
+    Backslash continuations are joined first. Without that, the regex stops at the
+    newline and only sees the first flag of a wrapped command -- which checked 4 of the
+    9 flags here and reported a clean run. A check that silently covers a quarter of
+    what it claims is worse than no check.
+    """
+    print("documented tool flags must exist")
+    text = "\n".join(
+        (SIM / doc).read_text() for pair in PAIRS for doc in pair)
+    joined = re.sub(r"\\\s*\n\s*", " ", text)
+
+    claims = {}
+    for m in re.finditer(r"tools/([a-z0-9_]+\.(?:py|sh))([^\n]*)", joined):
+        for flag in re.findall(r"(--[a-z][a-z-]+)", m.group(2)):
+            claims.setdefault(m.group(1), set()).add(flag)
+
+    for tool, flags in sorted(claims.items()):
+        path = SIM / "tools" / tool
+        if not path.exists():
+            continue        # already reported by check_tools_exist
+        src = path.read_text()
+        for flag in sorted(flags):
+            if flag not in src:
+                fail(f"docs pass {flag} to {tool}, which does not accept it")
+
+
 def check_line_refs():
     print("firmware file:line references must point at what the docs claim")
     for (name, line), needle in sorted(LINE_REFS.items()):
@@ -166,7 +198,8 @@ def check_line_refs():
 
 def main():
     for check in (check_tools_exist, check_tests_documented, check_links,
-                  check_pairs, check_memory_map, check_line_refs):
+                  check_pairs, check_memory_map, check_documented_flags,
+                  check_line_refs):
         check()
 
     print()

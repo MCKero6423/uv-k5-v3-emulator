@@ -501,8 +501,19 @@ modules. All four were found by comparing against the source, none by proofreadi
 So the comparison is mechanical now. It checks that every tool a README names exists,
 that every test in `run_tests.sh` is documented in both languages, that internal `.md`
 links resolve, that the translation pairs have matching heading structure, that the
-memory-map addresses match the model's `#define`s, and that documented firmware
-`file:line` references still point at what the prose claims.
+memory-map addresses match the model's `#define`s, that every long flag a doc passes to
+a tool actually exists in it, and that documented firmware `file:line` references still
+point at what the prose claims.
+
+The flag check earned its own lesson. Its first version matched only to the end of the
+line, so on a wrapped command like
+
+    python3 tools/screenshot.py --frame-addr 0x200013DC \
+        --status-addr 0x2000175C --port 1234 --out screen.png
+
+it saw `--frame-addr` and nothing else -- 4 of 9 flags, and it reported a clean run.
+**A check that silently covers a quarter of what it claims is worse than no check**,
+because the clean result is believed. Continuations are joined before matching now.
 
 One caution, from writing it. An early version compared firmware constants with a regex
 that took the first number on the line, so `key_debounce_10ms = 20 / 10` read as 20 and
