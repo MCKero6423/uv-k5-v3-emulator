@@ -85,6 +85,7 @@ run "register readback" bash tools/test_bk4819_readback.sh
 run "S-meter"           python3 tools/test_smeter.py
 run "PTT"               python3 tools/test_ptt.py
 run "scan"              python3 tools/test_scan.py
+run "audio path"        python3 tools/test_audio_path.py
 run "serial receive"    python3 tools/test_serial_rx.py
 run "flash persistence" python3 tools/test_flash_persist.py
 run "frequency entry"   python3 tools/test_freq_entry.py
