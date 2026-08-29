@@ -471,8 +471,8 @@ def render_index(scale: int) -> str:
   <p class="hint">How long you hold a key is measured here and sent as one
   number, so the firmware sees exactly the press you made. Hold past 400 ms for a
   long press, which the firmware treats as a separate event and which repeats.
-  Arrows move, Enter is MENU, Esc is EXIT, digits map straight through. No PTT
-  button -- the keypad model has no PTT line.</p>
+  Arrows move, Enter is MENU, Esc is EXIT, digits map straight through. PTT is held
+  rather than measured, and releases if you drag off it or close the tab.</p>
 </div>
 <script>
 const BINDINGS = {json.dumps(KEY_BINDINGS)};

@@ -459,6 +459,29 @@ Two constraints are not negotiable, both from untimed spin loops in the firmware
   measuring. Not hypothetical: the first test run decoded 48 registers correctly and
   still reported RSSI as 0 for precisely this reason.
 
+### PTT, and the transmit level bar
+
+PTT is not a matrix key. `GPIO_IsPttPressed` reads PB10 directly
+(`driver/gpio.h:31`, active low), so the model gives it its own GPIO line rather than a
+column/row intersection, exposed as a boolean `ptt` property on the keypad device.
+
+That is what makes the transmit level bar reachable. `app/app.c:1700` draws it only
+while `gCurrentFunction == FUNCTION_TRANSMIT` and `gSetting_mic_bar` is set — the
+latter is `Data[7]` bit 4 at flash `0xA0A8` (`settings.c:423`), and blank flash reads
+`0xFF`, so it is already on. The level itself comes from `REG_64` via
+`BK4819_GetVoiceAmplitudeOut`.
+
+**Treat the release as the important half.** A stuck PTT leaves the emulated radio
+keyed, and every later test then runs against a transmitting radio. The web UI releases
+on `pointerleave`, `pointercancel` and `pagehide`; `/api/release-all` clears PTT
+explicitly, because an empty `press` does not touch it; and the endpoint rejects
+non-boolean bodies so `{"held": "false"}` cannot key the transmitter by truthiness.
+`tools/test_ptt.py` asserts the release, not just the press.
+
+One trap worth knowing if you add another non-key button: the browser wired handlers
+over `.key`, which matched the PTT button as well, and it has no `data-key` — so it
+would have sent the key `"undefined"`. Use `.key[data-key]`.
+
 ### Reads were shifted one bit, and it hid everything else
 
 Fixed in `ad88ee1`, but worth reading because of how long it stayed invisible.

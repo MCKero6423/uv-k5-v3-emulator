@@ -31,8 +31,9 @@ class TestKeys(unittest.TestCase):
         names = set(re.findall(r'"([^"]+)"', block.group(1)))
         self.assertEqual(names, set(KEYS))
 
-    def test_ptt_is_not_offered(self):
-        # The keypad model has no PTT line; qom-set would error on it.
+    def test_ptt_is_not_offered_as_a_key(self):
+        # PTT works, but not through the key table: the firmware reads its own pin, so
+        # it is a separate boolean property. Setting "press" to PTT would error.
         self.assertFalse(is_valid("PTT"))
 
     def test_normalise_is_case_insensitive_and_strips(self):

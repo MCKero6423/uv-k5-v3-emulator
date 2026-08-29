@@ -43,6 +43,7 @@ has no public datasheet, so its driver is the only specification available.
 | Serial input, CPS programming protocol | works, `-serial` any chardev |
 | BK4819 register interface | works, RSSI and status readable |
 | S-meter | works via monitor (SIDE1); reads -53 dBm, S9+40 |
+| PTT and transmit | works; TX annunciator, timer, and mic level bar |
 | Timing accuracy | deliberately wrong, see [Timing](#timing) |
 | Analogue RF behaviour | **not modelled and never will be**, see [AGENTS.md](AGENTS.md#the-bk4819-and-where-modelling-it-stops) |
 
@@ -83,6 +84,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_bk4819.py         BK4819 register interface, RSSI not stuck at zero
       test_bk4819_readback.sh  register reads come back bit-aligned
       test_smeter.py         the S-meter reads a signal when monitoring
+      test_ptt.py            PTT keys the radio and releases cleanly
       lib_kill_emulator.sh   cleanup that only ever kills emulators
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
@@ -129,6 +131,7 @@ Then check the build actually works, which takes about a minute:
     python3 tools/test_bk4819.py
     bash tools/test_bk4819_readback.sh
     python3 tools/test_smeter.py
+    python3 tools/test_ptt.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean
@@ -250,8 +253,17 @@ watching the counters rather than by assuming:
 The rules do not survive a reboot. Re-run `apply`, or persist them with
 `iptables-persistent`.
 
-There is no PTT button: the keypad model has no PTT line, so the `press` property
-rejects the name. Unknown keys are rejected with 400 rather than forwarded.
+PTT is separate from the keypad grid, because the firmware reads its own pin (PB10)
+rather than scanning it as a matrix key. It has its own button in the UI and its own
+endpoint, and it is held rather than tapped:
+
+    curl -X POST -H 'Content-Type: application/json' \
+        -d '{"held": true}' http://127.0.0.1:8080/api/ptt
+
+Anything that ends a session releases it — dragging off the button, closing the tab,
+or `POST /api/release-all` — so a client going away cannot leave the radio keyed.
+The `press` property still rejects "PTT" as a key name; unknown keys get a 400 rather
+than being forwarded.
 
 ## How the machine is put together
 

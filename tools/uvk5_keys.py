@@ -4,9 +4,10 @@
 Mirrors keypad_key_names in qemu/py32f071.c. test_uvk5_keys.py parses that array
 out of the model source and fails if the two drift apart.
 
-PTT is absent on purpose: the keypad model has no PTT line -- it is wired
-separately on GPIOC -- so the "press" property rejects the name. Offering a PTT
-button would produce a QMP error rather than a transmission.
+PTT is absent on purpose, and still is now that the model supports it: the firmware
+reads PB10 directly rather than scanning PTT as a matrix key, so it is exposed as its
+own boolean property and its own endpoint (POST /api/ptt) instead of a name here. The
+"press" property rejects "PTT".
 """
 
 KEYS = (
