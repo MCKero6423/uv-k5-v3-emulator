@@ -3,6 +3,8 @@
 How `https://k6v3.mckero.dn42/` is set up on this host. The emulator UI itself
 speaks plain HTTP on loopback; nginx terminates TLS and proxies to it.
 
+*中文：[reverse-proxy.zh-CN.md](reverse-proxy.zh-CN.md) · the two are kept in step.*
+
 ## Why a proxy at all
 
 `tools/webui.py` has no TLS and no authentication. Running it on loopback and

@@ -3,6 +3,8 @@
 Notes for whoever picks this up next. Focused on what is not obvious from the
 code, and on mistakes that already cost time here.
 
+*中文：[AGENTS.zh-CN.md](AGENTS.zh-CN.md) · the two are kept in step; change both.*
+
 ## What this is
 
 A QEMU machine for the Puya PY32F071 (Cortex-M0+), so Quansheng UV-K5 V3
@@ -522,7 +524,7 @@ Counted from the firmware's own call sites:
 | GPIO | 55 | modelled |
 | DMA | 59 | modelled, over the CPU's address space |
 | SPI | 33 | modelled, with the flash |
-| TIM | 23 | **stub** — backlight PWM and `millis()` |
+| TIM | 23 | TIM2 modelled since `fdcbe80`; the rest stubbed (backlight PWM) |
 | ADC | 19 | modelled; result settable since `e46cae2` |
 | USART | 11 | modelled both directions |
 | RTC, IWDG, WWDG, I2C, USB, CRC, EXTI, PWR | 0 | stub, and the firmware never uses them |

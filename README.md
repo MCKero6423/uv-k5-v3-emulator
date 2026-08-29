@@ -7,6 +7,8 @@ The firmware boots to its main loop in about five seconds, the LCD contents are
 readable, and the keypad drives the menus. See [Status](#status) for what is and
 is not modelled.
 
+*中文：[README.zh-CN.md](README.zh-CN.md) · the two are kept in step; change both.*
+
 | Main screen | Menu | Navigated with keys |
 | --- | --- | --- |
 | ![main VFO screen](docs/screenshots/main-vfo.png) | ![menu at Step](docs/screenshots/menu-step.png) | ![menu at RxDCS](docs/screenshots/menu-navigated.png) |
@@ -78,6 +80,7 @@ keypresses silently stop working. Run the test after touching that code;
       calibration.bin        512-byte dump from a real radio
     deploy/                  nginx vhost for the HTTPS front end
     docs/reverse-proxy.md    how https://k6v3.mckero.dn42/ is served
+    *.zh-CN.md               Chinese translations, kept in step
     docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
       keypad_test.py         keypad regression test, boots its own instance
@@ -102,6 +105,12 @@ keypresses silently stop working. Run the test after touching that code;
       uvk5_qmp.py            QMP client
       uvk5_lcd.py            framebuffer decode, PNG encode, frame grabber
       uvk5_keys.py           key names the keypad model accepts
+      uvk5_logs.py           shared log buffer, with client-IP attribution
+      uvk5_stream.py         the MJPEG-style frame pump behind /stream
+      uvk5_supervisor.py     starts, stops and recovers the emulator process
+      test_kill_emulator.sh  cleanup never kills an unrelated process
+      (plus ad-hoc probe scripts -- scan_trace.sh, gpio_watch.py and friends --
+       kept because they are quick to reach for, not because they are polished)
     harness/, stubs/, shim/, tests/   host build of the CW timing chain (stage A)
 
 ## Building
@@ -227,8 +236,11 @@ Endpoints, if you want to script it:
 | `GET /stream` | multipart PNG stream, up to 15 fps |
 | `GET /frame.png` | one frame |
 | `POST /api/key` | `{"key": "MENU", "action": "down"}` — also `up` or `tap` |
-| `POST /api/release-all` | release every key, if one ever sticks |
-| `GET /api/status` | QMP `query-status` |
+| `POST /api/ptt` | `{"held": true}` — hold PTT, `false` to release |
+| `POST /api/release-all` | release every key and PTT, if one ever sticks |
+| `POST /api/power/<action>` | `on`, `off`, `reset`, `pause`, `resume` |
+| `GET /api/logs?since=N` | log entries after cursor N, with client IPs |
+| `GET /api/status` | QMP `query-status`, plus a `speaker` field |
 
 Frames are read with QMP `memsave`, about 1.35 ms each, and the guest keeps
 running throughout. Two details there are easy to get wrong:
@@ -323,7 +335,7 @@ Register layouts come from the vendor CMSIS header shipped with the firmware
     SPI2   0x40003800   flash
     ADC1   0x40012400
 
-Modelled: RCC, GPIO, ADC, both SPI controllers, DMA1, and the PY25Q16 flash.
+Modelled: RCC, GPIO, ADC, both SPI controllers, DMA1, TIM2, and the PY25Q16 flash.
 Everything else answers through a logging catch-all — the log is how the next
 thing worth modelling gets identified.
 
