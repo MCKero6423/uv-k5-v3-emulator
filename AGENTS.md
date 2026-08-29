@@ -510,6 +510,43 @@ plausible way to stall a scan, and the S-meter work made the receiver always bus
 Page 4 is *not* the meter row, incidentally — it stayed byte-identical across all six
 samples while the frequency changed.
 
+### Audio: there is nothing to model, and that is the finding
+
+"Add a speaker and a microphone, then grant the browser audio permission" is the
+obvious request, and it cannot be done — not for lack of effort but because neither
+device is on the MCU. Receive audio is demodulated inside the BK4819 and leaves as
+analogue on its AF pin; transmit audio goes from the microphone into the chip's own ADC.
+The firmware touches only:
+
+    PA8       amplifier enable  (GPIO_EnableAudioPath, driver/gpio.h:34)
+    REG_47    which AF source the chip routes
+    REG_64    a level it displays
+
+**No audio samples exist anywhere in the MCU's address space.** There is nothing to
+capture, nothing to play, and nothing for a browser permission to carry. Generating
+sound would be inventing data the firmware never produced — the same line as the
+analogue RF limit.
+
+What is real is the *intent*. `TYPE_UVK5_AUDIO` watches PA8 and exposes read-only
+`speaker-on`; the UI shows a speaker glyph and `/api/status` reports `speaker`.
+Read-only on purpose: a writable one would only let a test lie to itself. A unit test
+also asserts the page never asks for audio permission — no `getUserMedia`, no
+`AudioContext`, no `<audio>` — because prompting the user to approve something that
+cannot happen is worse than not offering it.
+
+### A stub that is more forgiving than the real client is worse than no stub
+
+`QmpClient.command` returns the **unwrapped** value and raises on error. The test stub
+returned `{"return": ...}`. So `webui.py` was written to unwrap a second time, all 88
+tests passed, and the live UI returned 500 with
+
+    TypeError: argument of type 'bool' is not iterable
+
+Two lessons, both of which cost time here. The stub is now pinned to the real contract
+by an explicit test. And the failure was originally swallowed by a bare
+`except: return None`, which made a broken call indistinguishable from a radio that was
+simply silent — and sent me hunting a stale process that did not exist. Log the reason.
+
 ### PTT, and the transmit level bar
 
 PTT is not a matrix key. `GPIO_IsPttPressed` reads PB10 directly

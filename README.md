@@ -44,6 +44,7 @@ has no public datasheet, so its driver is the only specification available.
 | BK4819 register interface | works, RSSI and status readable |
 | S-meter | works via monitor (SIDE1); reads -53 dBm, S9+40 |
 | PTT and transmit | works; TX annunciator, timer, and mic level bar |
+| Speaker / microphone audio | **no samples exist to model**, see [Audio](#audio) |
 | Timing accuracy | deliberately wrong, see [Timing](#timing) |
 | Analogue RF behaviour | **not modelled and never will be**, see [AGENTS.md](AGENTS.md#the-bk4819-and-where-modelling-it-stops) |
 
@@ -86,6 +87,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_smeter.py         the S-meter reads a signal when monitoring
       test_ptt.py            PTT keys the radio and releases cleanly
       test_scan.py           a busy band does not stall a scan
+      test_audio_path.py     the amplifier turns on when the firmware wants sound
       run_tests.sh           runs all of the above, build-checked first
       test_run_tests.sh      that the runner actually notices failures
       lib_kill_emulator.sh   cleanup that only ever kills emulators
@@ -143,6 +145,7 @@ that was never compiled. Individual tests still run standalone:
     python3 tools/test_smeter.py
     python3 tools/test_ptt.py
     python3 tools/test_scan.py
+    python3 tools/test_audio_path.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean
@@ -275,6 +278,29 @@ Anything that ends a session releases it — dragging off the button, closing th
 or `POST /api/release-all` — so a client going away cannot leave the radio keyed.
 The `press` property still rejects "PTT" as a key name; unknown keys get a 400 rather
 than being forwarded.
+
+## Audio
+
+There is no audio, and there is nothing to add. On the real radio neither the speaker
+nor the microphone passes through the MCU: receive audio is demodulated inside the
+BK4819 and leaves it as analogue on its AF output, and transmit audio goes from the
+microphone straight into the chip's own ADC. The firmware only ever touches three
+things:
+
+| | |
+|---|---|
+| PA8 | the amplifier enable, on or off |
+| `REG_47` | which AF source the chip routes |
+| `REG_64` | a level the firmware displays |
+
+No audio samples exist anywhere in the MCU's address space, so the emulator has nothing
+to capture or play — and the browser page needs no microphone or playback permission,
+because there would be nothing for it to carry. Generating sound here would mean
+inventing data the firmware never produced.
+
+What *is* real is whether the firmware currently wants sound, which PA8 states exactly.
+The UI shows it as a speaker glyph next to the power state, and `/api/status` reports it
+as `speaker`. Press SIDE1 to engage monitor and it lights up.
 
 ## How the machine is put together
 
