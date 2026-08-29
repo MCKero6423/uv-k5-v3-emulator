@@ -641,6 +641,7 @@ struct BK4819State {
     uint8_t  cmd;             /* register number, once known */
     bool     have_cmd;
     bool     reading;
+    bool     skip_falling;    /* the command byte's trailing edge, not a data bit */
     uint16_t shift_out;       /* bits being clocked out to the guest */
 
     /* Register file. 128 registers is enough: the number field is seven bits. */
@@ -689,6 +690,7 @@ static void bk4819_reset(DeviceState *dev)
     s->have_cmd = false;
     s->reading = false;
     s->shift_out = 0;
+    s->skip_falling = false;
 
     bk4819_seed_measurements(s);
 }
@@ -719,6 +721,7 @@ static void bk4819_set_cs(void *opaque, int line, int level)
         s->shift_in = 0;
         s->have_cmd = false;
         s->reading = false;
+        s->skip_falling = false;
     }
     s->cs = selected;
 }
@@ -747,6 +750,15 @@ static void bk4819_set_scl(void *opaque, int line, int level)
                 s->shift_in = 0;
                 if (s->reading) {
                     s->shift_out = s->regs[s->cmd];
+                    /*
+                     * The command byte's own trailing falling edge must not consume
+                     * bit 15. Each firmware bit is read/raise/lower, so the eighth
+                     * command bit is followed by a falling edge before the data loop
+                     * begins -- and the advance below would shift bit 15 away before
+                     * the guest ever sampled it, delivering the whole word one place
+                     * too high (0x0001 arrived as 0x0002).
+                     */
+                    s->skip_falling = true;
                     bk4819_update_sda(s);
                 }
             }
@@ -776,7 +788,9 @@ static void bk4819_set_scl(void *opaque, int line, int level)
         }
     }
 
-    if (falling && s->have_cmd && s->reading) {
+    if (falling && s->skip_falling) {
+        s->skip_falling = false;
+    } else if (falling && s->have_cmd && s->reading) {
         /*
          * Advance on the falling edge so the next bit is settled before the guest
          * samples it. BK4819_ReadU16 sets SCL low, reads, then sets it high.
