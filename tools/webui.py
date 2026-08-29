@@ -154,6 +154,18 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
             raise LookupError("emulator is off")
         target.command("qom-set", path=KEYPAD_PATH, property="press", value=value)
 
+    def set_ptt(held: bool):
+        """Hold or release PTT.
+
+        Separate from set_press because PTT is not a matrix key: the firmware reads
+        PB10 directly, so the model exposes it as its own boolean rather than a name
+        in the key table.
+        """
+        target = active_client()
+        if target is None:
+            raise LookupError("emulator is off")
+        target.command("qom-set", path=KEYPAD_PATH, property="ptt", value=held)
+
     @app.get("/")
     def index():
         return Response(render_index(scale), mimetype="text/html")
@@ -272,11 +284,38 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
             return jsonify(error="emulator is off; press On first"), 409
         return jsonify(ok=True, key=key, action=action, hold_ms=hold_ms)
 
+    @app.post("/api/ptt")
+    def api_ptt():
+        """Hold or release PTT.
+
+        Explicit down/up rather than a timed tap: transmitting is a state the operator
+        chooses to stay in, and a fixed duration would be wrong for it. The trade-off
+        is that a client which never sends the release leaves the radio keyed, so
+        /api/release-all clears this too.
+        """
+        body = request.get_json(silent=True) or {}
+        held = body.get("held")
+        if not isinstance(held, bool):
+            return jsonify(error="held must be true or false"), 400
+        try:
+            set_ptt(held)
+        except LookupError:
+            log.add("key", "PTT ignored: emulator is off", ip=client_ip())
+            return jsonify(error="emulator is off; press On first"), 409
+        log.add("key", f"PTT {'down' if held else 'up'}", ip=client_ip())
+        return jsonify(ok=True, ptt=held)
+
     @app.post("/api/release-all")
     def api_release_all():
-        """Safety valve: an empty press clears every key in the model."""
+        """Safety valve: clears every key in the model, PTT included.
+
+        PTT needs releasing explicitly -- it is not part of the key matrix, so an empty
+        press does not touch it, and a client that vanished mid-transmission would
+        otherwise leave the radio keyed indefinitely.
+        """
         try:
             set_press("")
+            set_ptt(False)
         except LookupError:
             return jsonify(error="emulator is off"), 409
         return jsonify(ok=True)
@@ -344,6 +383,9 @@ def render_index(scale: int) -> str:
     sides = "".join(
         f'<button class="key side" data-key="{k}">{k}</button>' for k in SIDE_KEYS
     )
+    # PTT is its own button, not a data-key one: it latches on press and releases on
+    # let-go rather than sending a measured tap, because transmitting is a state.
+    sides += '<button class="key side ptt" id="ptt">PTT</button>'
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -371,6 +413,8 @@ def render_index(scale: int) -> str:
   .key:hover {{ background:#343b44; }}
   .key.active {{ background:#4b8bf5; border-color:#4b8bf5; color:#fff; }}
   .side {{ width:76px; }}
+  /* Red while keyed, so it is obvious the radio is transmitting. */
+  .key.ptt.active {{ background:#da3633; border-color:#da3633; }}
   .hint {{ color:#6e7681; font-size:12px; text-align:center; max-width:430px; }}
   #status {{ font-size:12px; color:#6e7681; }}
   .powerbar {{ display:flex; gap:8px; align-items:center; align-self:stretch; }}
@@ -478,7 +522,9 @@ function up(key) {{
   sendKey(key, Math.max(performance.now() - started, MIN_HOLD_MS));
 }}
 
-document.querySelectorAll('.key').forEach(btn => {{
+// '.key[data-key]', not '.key': the PTT button shares the styling but carries no
+// data-key, and would otherwise register handlers that send the key "undefined".
+document.querySelectorAll('.key[data-key]').forEach(btn => {{
   const key = btn.dataset.key;
   btn.addEventListener('pointerdown', ev => {{ ev.preventDefault(); down(key); }});
   btn.addEventListener('pointerup', ev => {{ ev.preventDefault(); up(key); }});
@@ -486,6 +532,31 @@ document.querySelectorAll('.key').forEach(btn => {{
   btn.addEventListener('pointercancel', () => up(key));
   btn.addEventListener('contextmenu', ev => ev.preventDefault());
 }});
+
+// PTT latches for as long as the button is held, rather than sending a measured
+// duration. Transmitting is a state the operator stays in, so there is nothing to
+// measure -- and the release matters more than the press: pointerleave and
+// pointercancel are wired up so dragging off the button, or the browser stealing the
+// pointer, cannot leave the radio keyed.
+const pttBtn = document.getElementById('ptt');
+let pttHeld = false;
+function setPtt(held) {{
+  if (held === pttHeld) return;
+  pttHeld = held;
+  pttBtn.classList.toggle('active', held);
+  fetch('/api/ptt', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{held: held}}),
+  }}).catch(() => {{}});
+}}
+pttBtn.addEventListener('pointerdown', ev => {{ ev.preventDefault(); setPtt(true); }});
+pttBtn.addEventListener('pointerup', ev => {{ ev.preventDefault(); setPtt(false); }});
+pttBtn.addEventListener('pointerleave', () => setPtt(false));
+pttBtn.addEventListener('pointercancel', () => setPtt(false));
+pttBtn.addEventListener('contextmenu', ev => ev.preventDefault());
+// A closing tab must not leave it transmitting.
+addEventListener('pagehide', () => {{ if (pttHeld) setPtt(false); }});
 
 addEventListener('keydown', ev => {{
   const key = BINDINGS[ev.code];

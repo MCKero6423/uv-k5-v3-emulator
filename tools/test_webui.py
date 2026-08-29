@@ -25,8 +25,19 @@ class StubClient:
         return {}
 
     def presses(self):
-        """The sequence of values written to the keypad press property."""
-        return [a["value"] for n, a in self.sent if n == "qom-set"]
+        """The sequence of values written to the keypad press property.
+
+        Filtered by property name, because the keypad device also carries "ptt". An
+        earlier version collected every qom-set and so mixed PTT's booleans in with the
+        key names, which made presses()[-1] report False after a release-all.
+        """
+        return [a["value"] for n, a in self.sent
+                if n == "qom-set" and a.get("property") == "press"]
+
+    def ptts(self):
+        """The sequence of values written to the keypad ptt property."""
+        return [a["value"] for n, a in self.sent
+                if n == "qom-set" and a.get("property") == "ptt"]
 
 
 def make_app():
@@ -103,6 +114,51 @@ class TestKeyEndpoint(unittest.TestCase):
         resp = self.http.post("/api/release-all")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self.client.presses()[-1], "")
+
+    def test_release_all_also_releases_ptt(self):
+        """PTT is not in the matrix, so an empty press does not clear it.
+
+        Without this, a client that vanished mid-transmission would leave the emulated
+        radio keyed indefinitely.
+        """
+        self.http.post("/api/ptt", json={"held": True})
+        resp = self.http.post("/api/release-all")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.client.ptts()[-1], False)
+
+
+class TestPttEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.client, self.http = make_app()
+
+    def test_holding_ptt_sets_the_property(self):
+        resp = self.http.post("/api/ptt", json={"held": True})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["ptt"], True)
+        self.assertEqual(self.client.ptts(), [True])
+
+    def test_releasing_ptt_clears_the_property(self):
+        self.http.post("/api/ptt", json={"held": True})
+        self.http.post("/api/ptt", json={"held": False})
+        self.assertEqual(self.client.ptts(), [True, False])
+
+    def test_non_boolean_is_rejected(self):
+        """A string "true" must not be taken as held.
+
+        Truthiness would make {"held": "false"} key the transmitter, which is the
+        wrong way round for the one control that puts a signal on the air.
+        """
+        for value in ("true", 1, None, "yes"):
+            resp = self.http.post("/api/ptt", json={"held": value})
+            self.assertEqual(resp.status_code, 400, f"accepted {value!r}")
+        self.assertEqual(self.client.ptts(), [])
+
+    def test_ptt_is_logged_with_the_client_ip(self):
+        self.http.post("/api/ptt", json={"held": True},
+                       headers={"X-Forwarded-For": "172.21.91.140"})
+        entries = self.http.get("/api/logs?since=0").get_json()["entries"]
+        self.assertTrue(any("PTT down" in e["text"] and e["ip"] == "172.21.91.140"
+                            for e in entries), entries)
 
 
 class TestStream(unittest.TestCase):

@@ -433,6 +433,14 @@ struct UVK5KeypadState {
      * emitted. See AGENTS.md.
      */
     qemu_irq volatile row_out[KEYPAD_ROWS];
+
+    /*
+     * PTT, which is not part of the matrix: GPIO_IsPttPressed reads its own pin
+     * (PB10, active low), so it needs its own line. volatile for the same reason as
+     * row_out -- the board fills this in after init, invisibly to the compiler.
+     */
+    qemu_irq volatile ptt_out;
+    bool ptt;
 };
 
 /*
@@ -494,6 +502,9 @@ static void keypad_reset(DeviceState *dev)
 {
     UVK5KeypadState *s = UVK5_KEYPAD(dev);
 
+    s->ptt = false;
+    qemu_set_irq(s->ptt_out, 1);      /* released: idle high */
+
     memset(s->pressed, 0, sizeof(s->pressed));
     for (int c = 0; c < KEYPAD_COLS; c++) {
         s->col_high[c] = true;
@@ -517,6 +528,12 @@ static void keypad_init(Object *obj)
      * keeps -Wdiscarded-qualifiers quiet.
      */
     qdev_init_gpio_out_named(dev, (qemu_irq *)s->row_out, "row", KEYPAD_ROWS);
+
+    /*
+     * PTT is not part of the matrix. GPIO_IsPttPressed reads its own pin, so it gets
+     * its own line rather than a column/row intersection.
+     */
+    qdev_init_gpio_out_named(dev, (qemu_irq *)&s->ptt_out, "ptt", 1);
 }
 
 /*
@@ -584,6 +601,20 @@ static char *keypad_get_press(Object *obj, Error **errp)
     return g_strdup("");
 }
 
+static bool keypad_get_ptt(Object *obj, Error **errp)
+{
+    return UVK5_KEYPAD(obj)->ptt;
+}
+
+static void keypad_set_ptt(Object *obj, bool value, Error **errp)
+{
+    UVK5KeypadState *s = UVK5_KEYPAD(obj);
+
+    s->ptt = value;
+    /* Active low: pressed pulls the pin down. */
+    qemu_set_irq(s->ptt_out, value ? 0 : 1);
+}
+
 static void keypad_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -596,6 +627,11 @@ static void keypad_class_init(ObjectClass *klass, void *data)
     object_class_property_set_description(klass, "press",
         "hold the named key (MENU, UP, DOWN, EXIT, F, STAR, 0-9, SIDE1, SIDE2); "
         "empty string releases");
+
+    object_class_property_add_bool(klass, "ptt",
+                                   keypad_get_ptt, keypad_set_ptt);
+    object_class_property_set_description(klass, "ptt",
+        "hold the push-to-talk key, which puts the radio into transmit");
 }
 
 /* ---------------------------------------------------- BK4819 transceiver */
@@ -2561,6 +2597,16 @@ static void uvk5_machine_init(MachineState *machine)
                                                            "pin-in",
                                                            KEYPAD_ROW_PIN(r)));
     }
+
+    /*
+     * PTT on PB10, active low. Not a matrix key: GPIO_IsPttPressed reads the pin
+     * directly, so it is wired straight to the port.
+     */
+    qdev_connect_gpio_out_named(DEVICE(&s->keypad), "ptt", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->soc.gpio[1]),
+                                                       "pin-in", 10));
+    /* Released, now that the line exists to carry it. */
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&s->soc.gpio[1]), "pin-in", 10), 1);
 
     /*
      * Drive the initial row levels now that the lines exist. The device reset
