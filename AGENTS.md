@@ -497,20 +497,61 @@ and the gate is `app/app.c:1697`:
     if (gCurrentFunction != FUNCTION_POWER_SAVE || !gRxIdleMode)
         CheckRadioInterrupts();
 
-Both halves are false in that state, so `CheckRadioInterrupts` is never called and
-nothing can collect the flag. The emulator idles in power save, which is why this is
-the steady state rather than a transient.
+Both halves are false in that state, which looked like the answer: no
+`CheckRadioInterrupts`, so nothing to collect the flag.
 
-Gating on `REG_30` (which `BK4819_Sleep` zeroes on each power-save cycle) did not help
-either: the chip is awake at the moment the model is asked, while the firmware still
-has `gRxIdleMode=1`. Chip state and firmware state are not in step, so no condition
-available *inside* the device model can decide this correctly.
+**That explanation is wrong, and the test that disproves it is worth keeping.**
+`app/app.c:1374` refuses power save outright when `BATTERY_SAVE == 0`, and the byte
+lives at flash `0xA00B` (blank flash reads 0xFF, which `settings.c` clamps to 4 — the
+deepest setting, which is why the emulator idles there). Patch that byte to 0 and:
 
-So this is not a matter of finding a better trigger. A working version has to either
-keep the guest out of power save, or drive the interrupt from something that knows the
-firmware's receive state — neither of which belongs in a register model. Both attempts
-are reverted; the check that would confirm a third is `REG_0C` reading 0 afterwards,
-which `tools/test_bk4819.py` asserts.
+    BATTERY_SAVE=4:  fn=5 idle=1   polls=2161  acks=0
+    BATTERY_SAVE=0:  fn=0 idle=0   polls=2161  acks=0
+
+The gate now passes and the acknowledge count is still zero. A gdb backtrace on
+`BK4819_ReadRegister` confirms the loop really is running —
+`CheckRadioInterrupts` is inlined into `APP_TimeSlice10ms`, and that is the caller:
+
+    #0  BK4819_ReadRegister
+    #1  APP_TimeSlice10ms
+    #2  Main
+
+So the firmware reads `REG_0C`, gets 1, and does not write `REG_02`. Whatever
+suppresses that is inside the inlined loop, past the gate. Gating the model on
+`REG_30` (zeroed by `BK4819_Sleep`) does not help either — the chip is awake when the
+model is asked while the firmware still reports `gRxIdleMode=1`.
+
+**Where it actually stands.** A breakpoint on `BK4819_GetRSSI` never fires at all: in
+this idle state the firmware does not read RSSI, so the missing S-meter is not the
+model withholding a value. The receive state machine has to be entered first, and the
+squelch interrupt is one input to that rather than the switch.
+
+Both attempts are reverted and the committed model has no squelch logic. Do not resume
+this without a concrete reason to think the state machine can be entered — three
+rounds of increasingly precise instrumentation each ended at "the firmware is not
+asking", not at a fault in the device.
+
+Four measurement mistakes made this take far longer than the code involved. All four
+produced a confident, wrong conclusion:
+
+- **Sampling PC at the `REG_0C` read** lands in `BK4819_WriteU8`, the bit-banging
+  helper, not the caller. Sampling LR is no better: `BK4819_ReadRegister` calls
+  `BK4819_ReadU16`, so LR points back inside the reader. Use a breakpoint and a
+  backtrace.
+- **A probe printing `shift_out` before the assignment** reported `0000` for a value
+  about to be sent as `0001`. Nearly became "the model sends the wrong value".
+- **`BK4819_ReadRegister` returning 0x0 for REG_0C** looked like a broken read path,
+  and I changed the bit timing on the strength of it. But REG_0C legitimately holds 0
+  in the committed build — there is nothing to raise it. A register read returning the
+  register's actual contents is not evidence of anything. Check against a register the
+  firmware demonstrably wrote (`REG_3F` is `0x0C0C`, `REG_78` is `0x2F5B`).
+- **`nexti` after a breakpoint** landed somewhere unrelated and reported `r0 = 0`,
+  which fed the same wrong conclusion. `finish` gives the real return value.
+
+Also note `gdb` cannot call guest functions on this target (`print
+BK4819_ReadRegister(0x3f)` errors out), and there is no `gCurrentRSSI` global to read
+— RSSI is used and discarded. Breakpoint plus `finish` is the only way to see what the
+firmware actually received.
 
 **Where it stops.** This models the register interface, not the radio. It reproduces
 what the firmware *commanded* — frequency, power step, carrier keying in time — never
