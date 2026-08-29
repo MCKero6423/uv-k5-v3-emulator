@@ -88,6 +88,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_ptt.py            PTT keys the radio and releases cleanly
       test_scan.py           a busy band does not stall a scan
       test_audio_path.py     the amplifier turns on when the firmware wants sound
+      test_battery.py        battery level and low-battery follow the ADC
       run_tests.sh           runs all of the above, build-checked first
       test_run_tests.sh      that the runner actually notices failures
       lib_kill_emulator.sh   cleanup that only ever kills emulators
@@ -146,6 +147,7 @@ that was never compiled. Individual tests still run standalone:
     python3 tools/test_ptt.py
     python3 tools/test_scan.py
     python3 tools/test_audio_path.py
+    python3 tools/test_battery.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean

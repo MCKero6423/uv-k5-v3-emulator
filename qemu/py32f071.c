@@ -2005,6 +2005,7 @@ struct PY32AdcState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     uint32_t regs[0x20];
+    uint32_t result;          /* what a conversion returns; see PY32_ADC_RESULT */
 };
 
 #define ADC_SR    0x00
@@ -2023,8 +2024,15 @@ struct PY32AdcState {
 #define ADC_CR2_RSTCAL (1u << 3)
 #define ADC_CR2_SWSTART (1u << 22)
 
-/* Battery sits around 7.4 V; the calibration table in flash maps raw counts to
- * volts, and 2200 lands mid-scale on a real dump. */
+/*
+ * Battery sits around 7.4 V; the calibration table in flash maps raw counts to volts,
+ * and 2200 lands mid-scale on a real dump.
+ *
+ * Settable at runtime via the "adc-result" property, because a fixed reading cannot
+ * exercise anything interesting. The firmware derives gBatteryDisplayLevel from this
+ * and raises gLowBattery plus a warning popup below a threshold -- none of which can be
+ * reached, let alone tested, while the value never moves.
+ */
 #define PY32_ADC_RESULT 2200
 
 static uint64_t py32_adc_read(void *opaque, hwaddr addr, unsigned size)
@@ -2039,7 +2047,7 @@ static uint64_t py32_adc_read(void *opaque, hwaddr addr, unsigned size)
     if (addr == ADC_DR) {
         /* Reading the result clears end-of-conversion, as on hardware. */
         s->regs[ADC_SR >> 2] &= ~ADC_SR_EOC;
-        return PY32_ADC_RESULT;
+        return s->result;
     }
     return s->regs[idx];
 }
@@ -2090,6 +2098,27 @@ static void py32_adc_reset(DeviceState *dev)
 {
     PY32AdcState *s = PY32_ADC(dev);
     memset(s->regs, 0, sizeof(s->regs));
+    s->result = PY32_ADC_RESULT;
+}
+
+static void py32_adc_get_result(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    uint64_t value = PY32_ADC(obj)->result;
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void py32_adc_set_result(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    PY32AdcState *s = PY32_ADC(obj);
+    uint64_t value;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    /* 12-bit converter: clamp rather than wrap, so a silly value is obvious. */
+    s->result = value > 0xfff ? 0xfff : value;
 }
 
 static void py32_adc_init(Object *obj)
@@ -2104,6 +2133,18 @@ static void py32_adc_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->reset = py32_adc_reset;
     dc->desc = "PY32F071 ADC";
+
+    /*
+     * Settable so battery behaviour can be exercised. The firmware turns this raw
+     * count into gBatteryDisplayLevel via the calibration table in flash, and raises
+     * gLowBattery with a warning popup below a threshold; with a fixed reading none of
+     * that is reachable.
+     */
+    object_class_property_add(klass, "adc-result", "uint64",
+                              py32_adc_get_result, py32_adc_set_result,
+                              NULL, NULL);
+    object_class_property_set_description(klass, "adc-result",
+        "raw 12-bit ADC conversion result, which the firmware reads as battery voltage");
 }
 
 /*
