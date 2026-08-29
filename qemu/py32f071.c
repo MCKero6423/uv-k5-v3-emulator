@@ -629,6 +629,30 @@ OBJECT_DECLARE_SIMPLE_TYPE(BK4819State, UVK5_BK4819)
 #define BK4819_REG_GLITCH      0x63
 #define BK4819_REG_NOISE       0x65
 #define BK4819_REG_REVISION    0x00
+#define BK4819_REG_INT_FLAGS   0x02   /* which interrupts; written to acknowledge */
+#define BK4819_REG_INT_ENABLE  0x3F   /* which interrupts the firmware wants */
+#define BK4819_REG_AUDIO_AMP   0x64   /* TX audio amplitude, drives the audio bar */
+#define BK4819_REG_RX_ENABLE   0x30
+#define BK4819_REG_RSSI_THRESH 0x78   /* open level in 15:8, 0.5 dB/step */
+
+/*
+ * Interrupt bits, from App/driver/bk4819-regs.h:290-291.
+ *
+ * The names inverted my intuition and cost several attempts. Per the firmware's own
+ * handling in app/app.c:
+ *
+ *   :1027  if (interrupts.sqlLost)  g_SquelchLost = true;   <- a signal is present
+ *   :1035  if (interrupts.sqlFound) g_SquelchLost = false;  <- the channel went quiet
+ *
+ * "squelch lost" means the squelch has been lost, i.e. it opened. Reporting
+ * SQUELCH_FOUND -- which reads like "found a signal" -- tells the firmware the
+ * opposite, and CheckForIncoming returns immediately on !g_SquelchLost.
+ */
+#define BK4819_INT_SQUELCH_LOST  (1u << 2)   /* squelch opened: signal there */
+#define BK4819_INT_SQUELCH_FOUND (1u << 3)   /* squelch closed again */
+
+/* REG_30 bits, same header, :240. */
+#define BK4819_REG_30_ENABLE_RX_DSP  (1u << 0)
 
 struct BK4819State {
     DeviceState parent_obj;
@@ -642,6 +666,15 @@ struct BK4819State {
     bool     have_cmd;
     bool     reading;
     bool     skip_falling;    /* the command byte's trailing edge, not a data bit */
+
+    /*
+     * Interrupt flags awaiting collection, held apart from REG_02 because the firmware
+     * writes that register to acknowledge and then reads it back for the flags, so the
+     * value it reads has to survive its own clearing write.
+     */
+    uint16_t pending_int;
+    bool     squelch_open;
+    unsigned tick;            /* so the meters move instead of sitting flat */
     uint16_t shift_out;       /* bits being clocked out to the guest */
 
     /* Register file. 128 registers is enough: the number field is seven bits. */
@@ -678,6 +711,118 @@ static void bk4819_seed_measurements(BK4819State *s)
     s->regs[BK4819_REG_NOISE] = 0x0010;
 }
 
+/*
+ * Report a receiver that is hearing something, so the firmware's meters have data.
+ *
+ * Evaluated when the firmware polls REG_0C -- the moment it is actually asking. Doing
+ * this at configuration time instead is a trap: the firmware writes REG_3F to 0 and
+ * back to 0x0C0C repeatedly during setup, so a flag raised there is disabled again
+ * before anything collects it.
+ *
+ * This is not radio simulation. The levels are plausible numbers that move, not the
+ * result of modelling a signal. What they buy is firmware control flow running on live
+ * values rather than on zero -- squelch can open, the S-meter has something to draw,
+ * and a scan can evaluate a channel.
+ */
+static void bk4819_eval_receiver(BK4819State *s)
+{
+    s->tick++;
+
+    /*
+     * REG_67 counts 0.25 dB/step up from -160 dBm, so this sweeps about -44 to -36
+     * dBm: clear of any sane squelch threshold, and visibly varying so the S-meter
+     * does not look painted on.
+     */
+    const uint16_t rssi = 0x01C0 + ((s->tick * 7) & 0x3F);
+    s->regs[BK4819_REG_RSSI] = rssi;
+
+    /* Transmit audio amplitude, which UI_DisplayAudioBar reads via REG_64. */
+    s->regs[BK4819_REG_AUDIO_AMP] = 0x0400 + ((s->tick * 23) & 0x07FF);
+
+    /*
+     * A receiver with its DSP off hears nothing. Bit 0 of REG_30 is ENABLE_RX_DSP;
+     * BK4819_Sleep clears the register and waking sets 0xC1FE | ENABLE_RX_DSP. Testing
+     * the whole register against zero would be wrong, because TX and tone paths leave
+     * other bits set with RX_DSP clear.
+     *
+     * Any already-raised flag stays raised: real hardware does not withdraw an
+     * interrupt because the receiver was later powered down, and withdrawing it here
+     * meant the firmware's brief awake windows never lined up with an asserted flag.
+     */
+    if (!(s->regs[BK4819_REG_RX_ENABLE] & BK4819_REG_30_ENABLE_RX_DSP)) {
+        s->squelch_open = false;
+        return;
+    }
+
+    /* Say nothing about an interrupt the firmware has not asked for. */
+    if (!(s->regs[BK4819_REG_INT_ENABLE] & BK4819_INT_SQUELCH_LOST)) {
+        s->squelch_open = false;
+        return;
+    }
+
+    /*
+     * Compare against the threshold the firmware programmed. REG_78 bits 15:8 hold the
+     * open level at 0.5 dB/step against REG_67's 0.25, so it doubles. REG_4E's low bits
+     * are the *glitch* threshold, not this -- using those meant squelch never opened.
+     */
+    const uint16_t open_thresh = ((s->regs[BK4819_REG_RSSI_THRESH] >> 8) & 0xff) * 2;
+
+    /*
+     * Only consider raising every so often.
+     *
+     * This is the crux of the whole exercise. The firmware's collection loop re-reads
+     * REG_0C as its condition, and this function runs on every read -- so raising a new
+     * flag whenever the signal is present means the loop re-arms the very bit it is
+     * trying to clear and spins forever, with no timeout to save it. Announcing only
+     * once has the opposite failure: the news lands during startup, before
+     * g_SquelchLost leads anywhere, and is never repeated.
+     *
+     * Announcing periodically satisfies both. The loop always drains, because the
+     * intervening polls report nothing, and the firmware still hears about an open
+     * squelch again and again until it is in a state where that matters.
+     */
+    const bool may_announce = (s->tick % 64) == 0;
+
+    if (may_announce && open_thresh && rssi >= open_thresh) {
+        /*
+         * Re-announce on every poll while the signal is there, rather than only on the
+         * transition.
+         *
+         * Announcing once looks right and is not: the firmware collected that single
+         * flag during startup, before it had entered a state where g_SquelchLost leads
+         * anywhere, and then squelch_open suppressed every later attempt. Measured as 1
+         * raise, 1 acknowledge, and g_SquelchLost still 0 -- the news arrived while
+         * nobody was listening for it.
+         *
+         * A real chip re-raises for as long as the condition holds, so the firmware
+         * finds out whenever it next gets round to asking.
+         */
+        s->pending_int |= BK4819_INT_SQUELCH_LOST;
+        s->squelch_open = true;
+    } else if (s->squelch_open) {
+        /* Signal gone: tell the firmware to close up again. */
+        s->pending_int |= BK4819_INT_SQUELCH_FOUND;
+        s->squelch_open = false;
+    }
+
+    /*
+     * Assert the request only when something is genuinely waiting, and only once per
+     * poll -- never continuously.
+     *
+     * The distinction matters more than it looks. Holding the line high for as long as
+     * the condition persists is what hardware does, but the firmware's collection loop
+     *
+     *     while (ReadRegister(REG_0C) & 1) { ... }
+     *
+     * has no timeout, so a permanently asserted bit is an unbreakable loop rather than
+     * a busy receiver. Raising a fresh flag per poll gives the firmware the news
+     * repeatedly while still letting the loop exit every time.
+     */
+    if (s->pending_int) {
+        s->regs[BK4819_REG_INTERRUPT] |= 1u;
+    }
+}
+
 static void bk4819_reset(DeviceState *dev)
 {
     BK4819State *s = UVK5_BK4819(dev);
@@ -691,6 +836,9 @@ static void bk4819_reset(DeviceState *dev)
     s->reading = false;
     s->shift_out = 0;
     s->skip_falling = false;
+    s->pending_int = 0;
+    s->squelch_open = false;
+    s->tick = 0;
 
     bk4819_seed_measurements(s);
 }
@@ -749,6 +897,10 @@ static void bk4819_set_scl(void *opaque, int line, int level)
                 s->bit_count = 0;
                 s->shift_in = 0;
                 if (s->reading) {
+                    /* Refresh the meters at the moment the firmware asks. */
+                    if (s->cmd == BK4819_REG_INTERRUPT) {
+                        bk4819_eval_receiver(s);
+                    }
                     s->shift_out = s->regs[s->cmd];
                     /*
                      * The command byte's own trailing falling edge must not consume
@@ -783,6 +935,24 @@ static void bk4819_set_scl(void *opaque, int line, int level)
                  */
                 if (s->cmd == BK4819_REG_REVISION && (data & 0x8000)) {
                     bk4819_seed_measurements(s);
+                }
+
+                /*
+                 * Writing REG_02 acknowledges. The firmware's loop is
+                 *
+                 *     while (ReadRegister(REG_0C) & 1) {
+                 *         WriteRegister(REG_02, 0);      // clear
+                 *         flags = ReadRegister(REG_02);  // then collect
+                 *     }
+                 *
+                 * so the flags must appear in REG_02 as a result of the write, and the
+                 * request bit has to drop here. That loop has no timeout at all
+                 * (app/app.c:910, :1417), so leaving the bit set hangs the guest.
+                 */
+                if (s->cmd == BK4819_REG_INT_FLAGS) {
+                    s->regs[BK4819_REG_INT_FLAGS] = s->pending_int;
+                    s->pending_int = 0;
+                    s->regs[BK4819_REG_INTERRUPT] &= ~1u;
                 }
             }
         }
