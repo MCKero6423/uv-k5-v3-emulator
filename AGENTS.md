@@ -459,6 +459,33 @@ Two constraints are not negotiable, both from untimed spin loops in the firmware
   measuring. Not hypothetical: the first test run decoded 48 registers correctly and
   still reported RSSI as 0 for precisely this reason.
 
+### Running the tests
+
+    bash tools/run_tests.sh        # everything
+    bash tools/run_tests.sh -q     # unit tests only, no emulator, ~15 s
+
+Use the runner rather than pasting individual commands. It checks the build first and
+**stops** on failure, which matters more than it sounds: `ninja` leaves the previous
+binary in place when it fails, so tests run happily against code that was never
+compiled. That produced two rounds of entirely meaningless results before the habit
+stuck.
+
+It also rebuilds only when `qemu/py32f071.c` differs from the copy in the QEMU tree, so
+a plain test run does not pay for a rebuild it does not need.
+
+The runner checks *itself* first, via `tools/test_run_tests.sh`. Its first version wrote
+
+    if "$@" 2>&1 | sed 's/^/    /'; then
+
+which tests **sed's** exit status, not the test's — so every test would have counted as
+passing whatever broke. Hence `PIPESTATUS[0]`, and a self-check that asserts a failing
+test really is counted and named. A runner that cannot fail is worse than none, because
+it gets trusted. Test output also goes through `tr -cd` first: gdb-driven tests emit
+stray bytes that make the log a "binary file" to grep, which swallows the summary.
+
+Emulator tests boot their own QEMU on private ports and take 20-30 s each, so they do
+not disturb a running `run.sh` or web UI session.
+
 ### Counting distinct frames proves less than it looks
 
 Worth knowing before writing any test that watches the screen.

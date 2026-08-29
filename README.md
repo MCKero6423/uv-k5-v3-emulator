@@ -86,6 +86,8 @@ keypresses silently stop working. Run the test after touching that code;
       test_smeter.py         the S-meter reads a signal when monitoring
       test_ptt.py            PTT keys the radio and releases cleanly
       test_scan.py           a busy band does not stall a scan
+      run_tests.sh           runs all of the above, build-checked first
+      test_run_tests.sh      that the runner actually notices failures
       lib_kill_emulator.sh   cleanup that only ever kills emulators
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
@@ -124,6 +126,13 @@ Needs a QEMU 7.2 source tree, `meson`, `ninja`, `libfdt-dev`, `libglib2.0-dev`,
     cd build && ninja qemu-system-arm
 
 Then check the build actually works, which takes about a minute:
+
+    bash tools/run_tests.sh        # everything, a few minutes
+    bash tools/run_tests.sh -q     # unit tests only, ~15 s, no emulator
+
+The runner checks the build first and refuses to continue if it fails, because ninja
+leaves the previous binary in place and the tests would otherwise pass against code
+that was never compiled. Individual tests still run standalone:
 
     python3 tools/keypad_test.py
     python3 tools/test_flash_persist.py
