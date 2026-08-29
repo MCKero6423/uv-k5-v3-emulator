@@ -42,7 +42,8 @@ has no public datasheet, so its driver is the only specification available.
 | Serial output (firmware log) | works, appears in the web UI log |
 | Serial input, CPS programming protocol | works, `-serial` any chardev |
 | BK4819 register interface | works, RSSI and status readable |
-| S-meter | works via monitor (SIDE1); reads -53 dBm, S9+40 |
+| S-meter | works via monitor (SIDE1) |
+| Signal strength | depends on tuning: virtual stations vs noise floor |
 | PTT and transmit | works; TX annunciator, timer, and mic level bar |
 | Speaker / microphone audio | **no samples exist to model**, see [Audio](#audio) |
 | `millis()` / TIM2 | works; advances at roughly wall-clock rate |
@@ -91,6 +92,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_audio_path.py     the amplifier turns on when the firmware wants sound
       test_battery.py        battery level and low-battery follow the ADC
       test_millis.py         millis() advances, so timeouts can expire
+      test_spectrum.py       RSSI depends on tuning, not a constant
       run_tests.sh           runs all of the above, build-checked first
       test_run_tests.sh      that the runner actually notices failures
       lib_kill_emulator.sh   cleanup that only ever kills emulators
@@ -151,6 +153,7 @@ that was never compiled. Individual tests still run standalone:
     python3 tools/test_audio_path.py
     python3 tools/test_battery.py
     python3 tools/test_millis.py
+    python3 tools/test_spectrum.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean

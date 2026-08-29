@@ -541,12 +541,20 @@ the analogue side is not and cannot be**. Frequency, flash, keypad, serial, regi
 programming, battery — all real. Audio samples and RF behaviour — no data exists to
 model, in the MCU's address space or in any public datasheet.
 
-Two stubs are worth a look if more coverage is wanted, in order:
+`millis()`/TIM2 and the settable ADC closed the two gaps that mattered. What is left,
+and why:
 
-1. **TIM** — 23 call sites. `millis()` reads TIM2 as a free-running counter and
-   `backlight.c` drives PWM. Timeouts and backlight dimming currently cannot be
-   exercised.
-2. **EXTI** — zero call sites today, but any interrupt-driven rework would need it.
+**Backlight PWM — deliberately not modelled.** `backlight.c` drives intermediate
+brightness with TIM7 triggering DMA channel 7 to rewrite GPIOA `BSRR` from a 32-entry
+duty-cycle table, at `PWM_FREQ * DUTY_CYCLE_LEVELS` = 128 kHz. Modelling it means
+128,000 GPIO writes and DMA transfers per emulated second, and **nothing observable
+changes**: backlight is physical LED brightness and does not touch the framebuffer, so
+`frame.png` is byte-identical either way. The two endpoints that do have observable
+behaviour — brightness 0 and full — bypass the timer entirely and call
+`GPIO_TurnOffBacklight`/`TurnOnBacklight`, which already work. Cost is high, benefit is
+zero.
+
+**EXTI** — zero call sites today. Any interrupt-driven rework would need it first.
 
 ### Audio: there is nothing to model, and that is the finding
 

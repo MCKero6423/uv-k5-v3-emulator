@@ -838,16 +838,96 @@ static void bk4819_seed_measurements(BK4819State *s)
  * values rather than on zero -- squelch can open, the S-meter has something to draw,
  * and a scan can evaluate a channel.
  */
+/*
+ * The tuned frequency, in units of 10 Hz, as the firmware programmed it.
+ *
+ * BK4819_SetFrequency splits it across two registers (driver/bk4819.c:743):
+ *
+ *     REG_38 = Frequency        & 0xFFFF
+ *     REG_39 = (Frequency >> 16) & 0xFFFF
+ *
+ * Verified against a live guest: 0x0262 / 0x5A00 reads back as 40,000,000 -> 400.00000
+ * MHz, matching the frequency on screen.
+ */
+static uint32_t bk4819_tuned_hz10(BK4819State *s)
+{
+    return ((uint32_t)s->regs[0x39] << 16) | s->regs[0x38];
+}
+
+/*
+ * Signal strength for a tuned frequency, from a small table of virtual stations.
+ *
+ * This replaces a constant. A fixed RSSI comfortably above squelch meant the meter had
+ * a number to draw, but scanning, squelch and any "is this channel busy" decision faced
+ * a band that was uniformly and permanently occupied -- so none of that logic was
+ * really being exercised.
+ *
+ * What is honest here and what is not, stated plainly. The *shape* is real physics:
+ * received power falls off away from a carrier, and there is a noise floor underneath.
+ * The station list is invented -- these transmitters do not exist. So this reproduces
+ * "the firmware handles a band with signals in some places and not others", which is
+ * genuine behaviour coverage, and it does not reproduce any actual radio environment.
+ * Do not read a dBm figure here as a claim about the real world.
+ */
+struct BK4819Station {
+    uint32_t hz10;        /* centre frequency, units of 10 Hz */
+    uint16_t peak_rssi;   /* REG_67 counts at the centre; 0.25 dB/step from -160 dBm */
+};
+
+static const struct BK4819Station bk4819_stations[] = {
+    { 40000000, 0x01E0 },   /* 400.000 MHz, strong  -- about -40 dBm */
+    { 40012500, 0x0170 },   /* 400.125 MHz, medium  -- about -67 dBm */
+    { 43550000, 0x01A8 },   /* 435.500 MHz, strong  -- the satellite end of 70 cm */
+    { 14550000, 0x0150 },   /* 145.500 MHz, medium  -- 2 m */
+};
+
+/* Noise floor in REG_67 counts: about -125 dBm, well below any squelch threshold. */
+#define BK4819_NOISE_FLOOR 0x008C
+
+/*
+ * How quickly a station fades either side of centre. 12.5 kHz per step means a signal
+ * is gone within a few channel spacings, so adjacent channels are genuinely quiet and a
+ * scan has somewhere to stop and somewhere to move on from.
+ */
+#define BK4819_FADE_STEP_HZ10 1250
+#define BK4819_FADE_PER_STEP  0x30
+
+static uint16_t bk4819_rssi_for(BK4819State *s)
+{
+    const uint32_t tuned = bk4819_tuned_hz10(s);
+    uint16_t best = BK4819_NOISE_FLOOR;
+
+    if (tuned == 0) {
+        return best;    /* nothing programmed yet */
+    }
+
+    for (unsigned i = 0; i < ARRAY_SIZE(bk4819_stations); i++) {
+        const uint32_t centre = bk4819_stations[i].hz10;
+        const uint32_t offset = tuned > centre ? tuned - centre : centre - tuned;
+        const uint32_t steps = offset / BK4819_FADE_STEP_HZ10;
+        const uint32_t fade = steps * BK4819_FADE_PER_STEP;
+
+        if (fade >= bk4819_stations[i].peak_rssi) {
+            continue;   /* faded into the noise */
+        }
+        const uint16_t level = bk4819_stations[i].peak_rssi - fade;
+        if (level > best) {
+            best = level;
+        }
+    }
+    return best;
+}
+
 static void bk4819_eval_receiver(BK4819State *s)
 {
     s->tick++;
 
     /*
-     * REG_67 counts 0.25 dB/step up from -160 dBm, so this sweeps about -44 to -36
-     * dBm: clear of any sane squelch threshold, and visibly varying so the S-meter
-     * does not look painted on.
+     * RSSI now depends on where the radio is tuned, plus a little jitter so the meter
+     * does not look painted on. REG_67 counts 0.25 dB/step up from -160 dBm.
      */
-    const uint16_t rssi = 0x01C0 + ((s->tick * 7) & 0x3F);
+    const uint16_t base = bk4819_rssi_for(s);
+    const uint16_t rssi = base + ((s->tick * 7) & 0x07);
     s->regs[BK4819_REG_RSSI] = rssi;
 
     /* Transmit audio amplitude, which UI_DisplayAudioBar reads via REG_64. */

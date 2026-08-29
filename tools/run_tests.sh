@@ -88,6 +88,7 @@ run "scan"              python3 tools/test_scan.py
 run "audio path"        python3 tools/test_audio_path.py
 run "battery"           python3 tools/test_battery.py
 run "millis"            python3 tools/test_millis.py
+run "spectrum"          python3 tools/test_spectrum.py
 run "serial receive"    python3 tools/test_serial_rx.py
 run "flash persistence" python3 tools/test_flash_persist.py
 run "frequency entry"   python3 tools/test_freq_entry.py
