@@ -29,6 +29,7 @@ from uvk5_logs import LogBuffer
 from uvk5_stream import FramePump
 
 KEYPAD_PATH = "/machine/keypad"
+AUDIO_PATH = "/machine/audio"
 
 # Firmware thresholds, from App/misc.c:
 #   key_debounce_10ms     = 2  -> 20 ms to register a press
@@ -154,6 +155,30 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
             raise LookupError("emulator is off")
         target.command("qom-set", path=KEYPAD_PATH, property="press", value=value)
 
+    def speaker_on():
+        """Whether the firmware has enabled the audio amplifier (PA8).
+
+        Not audio. The microphone and speaker are wired to the BK4819, not to the MCU,
+        so no samples pass through the emulator and there is nothing to stream to a
+        browser -- which is also why this needs no audio permission. What it reports is
+        the firmware's intent: whether the radio would be making sound right now.
+        """
+        target = active_client()
+        if target is None:
+            return None
+        try:
+            # command() returns the unwrapped value and raises on a QMP error, so there
+            # is no envelope to inspect here. Treating the result as {"return": ...}
+            # raised TypeError: argument of type 'bool' is not iterable.
+            return target.command("qom-get", path=AUDIO_PATH,
+                                  property="speaker-on")
+        except Exception as exc:
+            # Log rather than swallow. A silent None is indistinguishable from a radio
+            # that simply is not making sound, which sent me looking in the wrong place
+            # once already.
+            log.add("qemu", f"speaker state unavailable: {exc}")
+            return None
+
     def set_ptt(held: bool):
         """Hold or release PTT.
 
@@ -180,7 +205,7 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
         except Exception as exc:
             # The emulator can die under us; that is a state to report, not a 500.
             return jsonify(powered=False, status="unreachable", error=str(exc))
-        return jsonify(powered=True, **info)
+        return jsonify(powered=True, speaker=speaker_on(), **info)
 
     @app.get("/api/logs")
     def api_logs():
@@ -425,6 +450,15 @@ def render_index(scale: int) -> str:
   #powerstate {{ font-size:12px; color:#6e7681; margin-left:auto; }}
   #powerstate.on {{ color:#3fb950; }}
   /*
+   * Speaker indicator. Not audio: the microphone and speaker are wired to the BK4819
+   * rather than the MCU, so no samples reach the emulator and there is nothing to play
+   * -- which is why this page asks for no audio permission. It shows whether the
+   * firmware currently has the amplifier enabled, i.e. whether a real radio would be
+   * making sound.
+   */
+  #speaker {{ font-size:14px; opacity:0.25; transition:opacity 0.15s; }}
+  #speaker.on {{ opacity:1; }}
+  /*
    * Powered off is a dark panel, drawn by the wrapper so the frame itself can be
    * hidden. An earlier attempt put a dark background on the <img> alone, which
    * changed nothing visible: the image kept painting the last frame over it, so
@@ -454,6 +488,7 @@ def render_index(scale: int) -> str:
     <button class="pwr" data-power="off">Off</button>
     <button class="pwr" data-power="reset">Reset</button>
     <span id="powerstate">-</span>
+    <span id="speaker" title="the firmware has enabled the audio amplifier">&#128264;</span>
   </div>
   <div class="screenwrap" id="screenwrap">
     <img id="screen" src="/stream" alt="radio LCD"
@@ -604,6 +639,10 @@ document.querySelectorAll('.pwr').forEach(btn => {{
   }});
 }});
 
+function showSpeaker(on) {{
+  document.getElementById('speaker').classList.toggle('on', !!on);
+}}
+
 function showPower(powered) {{
   const label = document.getElementById('powerstate');
   label.textContent = powered ? 'on' : 'off';
@@ -617,15 +656,20 @@ async function poll() {{
     const r = await fetch('/api/status');
     const s = await r.json();
     showPower(!!s.powered);
+    showSpeaker(s.speaker);
     document.getElementById('status').textContent =
       s.powered ? ('guest: ' + (s.status || 'unknown'))
                 : 'powered off -- press On to boot';
   }} catch (err) {{
     showPower(false);
+    showSpeaker(false);
     document.getElementById('status').textContent = 'server unreachable';
   }}
 }}
 poll();
+// 3 s: the speaker indicator rides this existing request rather than adding another.
+// It lags a real amplifier transition by up to that long, which is fine for showing
+// state and would not be for anything timing-sensitive.
 setInterval(poll, 3000);
 
 // Cap the DOM as well as the server-side buffer. The pane scrolls, but an

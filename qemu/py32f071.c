@@ -634,6 +634,84 @@ static void keypad_class_init(ObjectClass *klass, void *data)
         "hold the push-to-talk key, which puts the radio into transmit");
 }
 
+/* -------------------------------------------------------------- audio path */
+
+/*
+ * The speaker enable line, and why there is no audio stream here.
+ *
+ * On the real radio neither the microphone nor the speaker passes through the MCU.
+ * Receive audio is demodulated inside the BK4819 and leaves it as analogue on its AF
+ * output; transmit audio goes from the microphone into the chip's own ADC. The
+ * firmware's entire involvement is:
+ *
+ *   - PA8 high or low, the amplifier enable (GPIO_EnableAudioPath, driver/gpio.h:34)
+ *   - REG_47, which AF source the chip routes
+ *   - REG_64, a read-only level the firmware displays
+ *
+ * There are no samples anywhere in the MCU's address space, so there is nothing for a
+ * device model to capture or play. Modelling "a speaker" would mean synthesising audio
+ * the firmware never produced, which would be invention rather than emulation.
+ *
+ * What is real and worth exposing is the *intent*: whether the firmware currently wants
+ * sound, which is exactly what PA8 says. A test can assert that receiving with the
+ * squelch open turns the amplifier on, and a UI can show a speaker icon, without either
+ * pretending to carry audio.
+ */
+#define TYPE_UVK5_AUDIO "uvk5-audio"
+OBJECT_DECLARE_SIMPLE_TYPE(UVK5AudioState, UVK5_AUDIO)
+
+struct UVK5AudioState {
+    DeviceState parent_obj;
+
+    bool     path_on;      /* PA8: the amplifier is enabled */
+    unsigned transitions;  /* how many times it has changed, for tests */
+};
+
+static void audio_set_path(void *opaque, int line, int level)
+{
+    UVK5AudioState *s = opaque;
+    const bool on = !!level;
+
+    if (on != s->path_on) {
+        s->path_on = on;
+        s->transitions++;
+    }
+}
+
+static bool audio_get_path_on(Object *obj, Error **errp)
+{
+    return UVK5_AUDIO(obj)->path_on;
+}
+
+static void audio_reset(DeviceState *dev)
+{
+    UVK5AudioState *s = UVK5_AUDIO(dev);
+
+    s->path_on = false;
+    s->transitions = 0;
+}
+
+static void audio_init(Object *obj)
+{
+    qdev_init_gpio_in_named(DEVICE(obj), audio_set_path, "path", 1);
+}
+
+static void audio_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->reset = audio_reset;
+    dc->desc = "UV-K5 audio amplifier enable";
+
+    /*
+     * Read-only on purpose. This reflects what the firmware decided; letting a test
+     * write it would only let the test lie to itself.
+     */
+    object_class_property_add_bool(klass, "speaker-on", audio_get_path_on, NULL);
+    object_class_property_set_description(klass, "speaker-on",
+        "whether the firmware has enabled the audio amplifier (PA8)");
+}
+
 /* ---------------------------------------------------- BK4819 transceiver */
 
 /*
@@ -2516,6 +2594,7 @@ struct UVK5MachineState {
     PY25Q16State  flash;
     UVK5KeypadState keypad;
     BK4819State     bk4819;
+    UVK5AudioState  audio;
     Clock *sysclk;
     char  *flash_image;
 };
@@ -2646,6 +2725,19 @@ static void uvk5_machine_init(MachineState *machine)
                                                        "pin-in", 9));
 
     /*
+     * The audio amplifier enable, PA8. Watching it is the whole of what an audio model
+     * can honestly do here: the microphone and speaker are wired to the BK4819, not to
+     * the MCU, so no samples ever pass through the address space. See the comment on
+     * TYPE_UVK5_AUDIO.
+     */
+    object_initialize_child(OBJECT(machine), "audio", &s->audio,
+                            TYPE_UVK5_AUDIO);
+    qdev_realize(DEVICE(&s->audio), NULL, &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[0]), "pin-out", 8,
+                                qdev_get_gpio_in_named(DEVICE(&s->audio),
+                                                       "path", 0));
+
+    /*
      * The application lives at PY32_APP_OFFSET, past the bootloader. Passing
      * that as the load offset means a plain application .elf/.bin boots without
      * needing a bootloader image.
@@ -2717,6 +2809,13 @@ static const TypeInfo py32_types[] = {
         .instance_size = sizeof(UVK5KeypadState),
         .instance_init = keypad_init,
         .class_init = keypad_class_init,
+    },
+    {
+        .name = TYPE_UVK5_AUDIO,
+        .parent = TYPE_DEVICE,
+        .instance_size = sizeof(UVK5AudioState),
+        .instance_init = audio_init,
+        .class_init = audio_class_init,
     },
     {
         .name = TYPE_UVK5_BK4819,

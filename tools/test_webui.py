@@ -11,11 +11,20 @@ class StubClient:
 
     def __init__(self):
         self.sent = []
+        self.speaker = False
 
     def command(self, name, **args):
         self.sent.append((name, args))
         if name == "query-status":
             return {"status": "running", "running": True}
+        if name == "qom-get" and args.get("property") == "speaker-on":
+            # The real client unwraps: QmpClient.command returns msg["return"]
+            # directly and raises on error. An earlier version of this stub returned
+            # {"return": ...}, so webui.py was written to unwrap a second time and blew
+            # up with "argument of type 'bool' is not iterable" against a live guest,
+            # while the tests passed. A stub that is more forgiving than the real thing
+            # is worse than no stub.
+            return self.speaker
         if name == "memsave":
             with open(args["filename"], "wb") as fh:
                 fh.write(bytes(args["size"]))
@@ -733,3 +742,52 @@ class TestClientIpInLogs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSpeakerIndicator(unittest.TestCase):
+    """The UI reports whether the firmware wants sound.
+
+    Deliberately not audio. The microphone and speaker are wired to the BK4819 rather
+    than the MCU, so no samples reach the emulator, there is nothing to stream, and the
+    page needs no audio permission. What is reported is the amplifier enable (PA8), i.e.
+    the firmware's intent.
+    """
+
+    def setUp(self):
+        self.client, self.http = make_app()
+
+    def test_stub_matches_the_real_client_contract(self):
+        """qom-get must yield the value itself, not a {"return": ...} envelope.
+
+        This pins the stub to QmpClient.command's actual behaviour. When they diverged,
+        every test passed and the live web UI returned 500.
+        """
+        result = self.client.command("qom-get", path="/machine/audio",
+                                     property="speaker-on")
+        self.assertIsInstance(result, bool)
+
+    def test_status_reports_the_speaker_state(self):
+        self.client.speaker = True
+        body = self.http.get("/api/status").get_json()
+        self.assertTrue(body["speaker"])
+
+    def test_status_reports_a_silent_radio(self):
+        self.client.speaker = False
+        body = self.http.get("/api/status").get_json()
+        self.assertFalse(body["speaker"])
+
+    def test_page_has_an_indicator_wired_to_the_poll(self):
+        body = self.http.get("/").get_data(as_text=True)
+        self.assertIn('id="speaker"', body)
+        self.assertIn("showSpeaker", body)
+
+    def test_page_requests_no_audio_permission(self):
+        """Nothing here should ask the browser for a microphone or to play audio.
+
+        There is no audio to carry, so a permission prompt would be asking the user to
+        approve something that cannot happen.
+        """
+        body = self.http.get("/").get_data(as_text=True)
+        for forbidden in ("getUserMedia", "AudioContext", "navigator.mediaDevices",
+                          "new Audio", "<audio"):
+            self.assertNotIn(forbidden, body)
