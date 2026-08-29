@@ -2147,6 +2147,128 @@ static void py32_adc_class_init(ObjectClass *klass, void *data)
         "raw 12-bit ADC conversion result, which the firmware reads as battery voltage");
 }
 
+/* ------------------------------------------------------------------ TIM2 */
+
+/*
+ * TIM2 as a free-running counter, which is what the firmware's millis() reads.
+ *
+ * driver/millis.c programs a prescaler of SystemCoreClock/1000 and an auto-reload of
+ * 0xFFFFFFFF, then reads CNT directly:
+ *
+ *     uint32_t millis(void) { return LL_TIM_GetCounter(TIM2); }
+ *
+ * A stub returns whatever was last written, so millis() sat at 0 forever and every
+ * timeout built on it -- 17 call sites -- could never expire. That is a silent wrong
+ * answer rather than a hang, which is the harder kind to notice.
+ *
+ * The count comes from the host clock rather than guest cycles. Guest time here is not
+ * proportional to wall time anyway (see the SysTick note in README.md), and code that
+ * measures elapsed milliseconds wants something that advances at roughly the rate a
+ * human observes. Do not use this to check anything that needs cycle accuracy.
+ */
+#define TYPE_PY32_TIM2 "py32-tim2"
+OBJECT_DECLARE_SIMPLE_TYPE(PY32Tim2State, PY32_TIM2)
+
+struct PY32Tim2State {
+    SysBusDevice parent_obj;
+    MemoryRegion iomem;
+    uint32_t regs[0x20];
+    int64_t  started_ms;      /* host time at which the counter was enabled */
+    uint32_t offset;          /* what CNT was set to when that happened */
+    bool     running;
+};
+
+#define TIM_CR1  0x00
+#define TIM_CNT  0x24
+#define TIM_PSC  0x28
+#define TIM_ARR  0x2C
+
+#define TIM_CR1_CEN (1u << 0)
+
+static uint32_t py32_tim2_count(PY32Tim2State *s)
+{
+    if (!s->running) {
+        return s->offset;
+    }
+    const int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    return s->offset + (uint32_t)(now - s->started_ms);
+}
+
+static uint64_t py32_tim2_read(void *opaque, hwaddr addr, unsigned size)
+{
+    PY32Tim2State *s = opaque;
+    const unsigned idx = addr >> 2;
+
+    if (addr == TIM_CNT) {
+        return py32_tim2_count(s);
+    }
+    return idx < ARRAY_SIZE(s->regs) ? s->regs[idx] : 0;
+}
+
+static void py32_tim2_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
+{
+    PY32Tim2State *s = opaque;
+    const unsigned idx = addr >> 2;
+
+    if (idx >= ARRAY_SIZE(s->regs)) {
+        return;
+    }
+
+    switch (addr) {
+    case TIM_CNT:
+        /* Writing CNT rebases the count, so millis() can be reset. */
+        s->offset = value;
+        s->started_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+        break;
+    case TIM_CR1:
+        if ((value & TIM_CR1_CEN) && !s->running) {
+            s->offset = py32_tim2_count(s);
+            s->started_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+            s->running = true;
+        } else if (!(value & TIM_CR1_CEN) && s->running) {
+            /* Freeze at the current value rather than snapping back to zero. */
+            s->offset = py32_tim2_count(s);
+            s->running = false;
+        }
+        break;
+    }
+    s->regs[idx] = value;
+}
+
+static const MemoryRegionOps py32_tim2_ops = {
+    .read = py32_tim2_read,
+    .write = py32_tim2_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
+static void py32_tim2_reset(DeviceState *dev)
+{
+    PY32Tim2State *s = PY32_TIM2(dev);
+
+    memset(s->regs, 0, sizeof(s->regs));
+    s->offset = 0;
+    s->started_ms = 0;
+    s->running = false;
+}
+
+static void py32_tim2_init(Object *obj)
+{
+    PY32Tim2State *s = PY32_TIM2(obj);
+
+    memory_region_init_io(&s->iomem, obj, &py32_tim2_ops, s, TYPE_PY32_TIM2, 0x400);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+}
+
+static void py32_tim2_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->reset = py32_tim2_reset;
+    dc->desc = "PY32F071 TIM2, the millisecond counter behind millis()";
+}
+
 /*
  * Peripherals the firmware touches during init but whose behaviour it does not
  * depend on yet (FLASH latency, PWR, SYSCFG, EXTI, CRC, timers, I2C, ADC).
@@ -2383,6 +2505,7 @@ struct PY32F071State {
     PY32RccState  rcc;
     PY32GpioState gpio[PY32_NUM_GPIO];
     PY32AdcState  adc;
+    PY32Tim2State tim2;
     PY32SpiState  spi[2];
     PY32DmaState  dma;
     PY32StubState stub[PY32_NUM_STUB];
@@ -2410,7 +2533,6 @@ static const struct { const char *name; hwaddr base; uint32_t size; } py32_stubs
     { "i2c1",      PY32_I2C1_BASE,    0x400 },
     { "i2c2",      PY32_I2C2_BASE,    0x400 },
     { "tim1",      PY32_TIM1_BASE,    0x400 },
-    { "tim2",      PY32_TIM2_BASE,    0x400 },
     { "tim3",      PY32_TIM3_BASE,    0x400 },
     { "tim6",      PY32_TIM6_BASE,    0x400 },
     { "tim7",      PY32_TIM7_BASE,    0x400 },
@@ -2440,6 +2562,7 @@ static void py32f071_soc_init(Object *obj)
     object_initialize_child(obj, "armv7m", &s->armv7m, TYPE_ARMV7M);
     object_initialize_child(obj, "rcc", &s->rcc, TYPE_PY32_RCC);
     object_initialize_child(obj, "adc", &s->adc, TYPE_PY32_ADC);
+    object_initialize_child(obj, "tim2", &s->tim2, TYPE_PY32_TIM2);
     object_initialize_child(obj, "spi1", &s->spi[0], TYPE_PY32_SPI);
     object_initialize_child(obj, "spi2", &s->spi[1], TYPE_PY32_SPI);
     object_initialize_child(obj, "dma1", &s->dma, TYPE_PY32_DMA);
@@ -2511,6 +2634,16 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
     }
     memory_region_add_subregion(&s->container, PY32_ADC1_BASE,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->adc), 0));
+
+    /*
+     * TIM2 gets a real model rather than the catch-all stub: millis() reads its counter
+     * directly, and a stub left that at 0 forever.
+     */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->tim2), errp)) {
+        return;
+    }
+    memory_region_add_subregion(&s->container, PY32_TIM2_BASE,
+                                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->tim2), 0));
 
     static const hwaddr spi_bases[2] = { PY32_SPI1_BASE, PY32_SPI2_BASE };
     static const char *spi_names[2] = { "1", "2" };
@@ -2877,6 +3010,13 @@ static const TypeInfo py32_types[] = {
         .instance_size = sizeof(PY32SpiState),
         .instance_init = py32_spi_init,
         .class_init = py32_spi_class_init,
+    },
+    {
+        .name = TYPE_PY32_TIM2,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(PY32Tim2State),
+        .instance_init = py32_tim2_init,
+        .class_init = py32_tim2_class_init,
     },
     {
         .name = TYPE_PY32_ADC,

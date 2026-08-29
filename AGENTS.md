@@ -510,6 +510,44 @@ plausible way to stall a scan, and the S-meter work made the receiver always bus
 Page 4 is *not* the meter row, incidentally — it stayed byte-identical across all six
 samples while the frequency changed.
 
+### What is actually reproduced, and what only answers reads
+
+Written after a fair criticism: progress reports kept saying what *runs* rather than
+what is genuinely reproduced. Those are different, and the gap is easy to hide.
+
+Counted from the firmware's own call sites:
+
+| peripheral | call sites | state |
+|---|---|---|
+| GPIO | 55 | modelled |
+| DMA | 59 | modelled, over the CPU's address space |
+| SPI | 33 | modelled, with the flash |
+| TIM | 23 | **stub** — backlight PWM and `millis()` |
+| ADC | 19 | modelled; result settable since `e46cae2` |
+| USART | 11 | modelled both directions |
+| RTC, IWDG, WWDG, I2C, USB, CRC, EXTI, PWR | 0 | stub, and the firmware never uses them |
+
+Plus, outside the SoC: the keypad, the BK4819 register interface, and the audio enable
+line.
+
+**A stub accepts writes and returns the last value.** That is enough not to hang and
+nothing more. The distinction matters because it is invisible from above: the ADC was
+*modelled*, and still returned a hardcoded 2200 forever, so `gBatteryDisplayLevel`,
+`gLowBattery` and the low-battery popup were unreachable. Answering reads is not the
+same as being reproduced.
+
+The honest summary is that **the digital side the firmware depends on is reproduced, and
+the analogue side is not and cannot be**. Frequency, flash, keypad, serial, register
+programming, battery — all real. Audio samples and RF behaviour — no data exists to
+model, in the MCU's address space or in any public datasheet.
+
+Two stubs are worth a look if more coverage is wanted, in order:
+
+1. **TIM** — 23 call sites. `millis()` reads TIM2 as a free-running counter and
+   `backlight.c` drives PWM. Timeouts and backlight dimming currently cannot be
+   exercised.
+2. **EXTI** — zero call sites today, but any interrupt-driven rework would need it.
+
 ### Audio: there is nothing to model, and that is the finding
 
 "Add a speaker and a microphone, then grant the browser audio permission" is the
