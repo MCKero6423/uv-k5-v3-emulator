@@ -459,6 +459,34 @@ Two constraints are not negotiable, both from untimed spin loops in the firmware
   measuring. Not hypothetical: the first test run decoded 48 registers correctly and
   still reported RSSI as 0 for precisely this reason.
 
+### Reads were shifted one bit, and it hid everything else
+
+Fixed in `ad88ee1`, but worth reading because of how long it stayed invisible.
+
+Register reads arrived shifted one place left: seed `REG_0C` with `0x1248` and the
+firmware received `0x2490`. Each firmware bit is read/raise/lower, so the eighth
+command bit is followed by a falling edge before the data phase — and the model was
+treating that edge as a data clock, shifting bit 15 away before the guest sampled it.
+
+Why nobody noticed: **writes were always fine**, 52 registers held exactly what the
+firmware wrote, and the register the firmware polls hardest was legitimately `0`.
+Reading zero and getting zero looks like success. Verifying a read path requires a
+register with a known *non-zero* value — `REG_3F` is `0x0C0C`, `REG_78` is `0x2F5B`.
+
+`tools/test_bk4819_readback.sh` guards it now: seeds `REG_0C` (read ~1700 times per
+30 s, so a sample is guaranteed) with a value carrying bits in both halves, and names
+the shift direction on failure. Bit 0 is left clear deliberately — with it set the
+firmware enters an untimed acknowledge loop, and that test is about alignment only.
+
+This also invalidated four earlier diagnoses. Attempts at the squelch interrupt had
+the model raising `REG_0C` bit 0 while the firmware received bit 1, so
+
+    while (BK4819_ReadRegister(BK4819_REG_0C) & 1u)
+
+was never true and 1719 polls saw a flag the guest could not act on. Every one of
+those rounds was blamed on timing or gating. **When several independent attempts fail
+the same way, suspect the shared transport, not the logic on top of it.**
+
 ### The squelch interrupt: attempted, backed out
 
 Scanning works — long-press `*` and the frequency really does step, 6 distinct frames
@@ -521,15 +549,32 @@ suppresses that is inside the inlined loop, past the gate. Gating the model on
 `REG_30` (zeroed by `BK4819_Sleep`) does not help either — the chip is awake when the
 model is asked while the firmware still reports `gRxIdleMode=1`.
 
-**Where it actually stands.** A breakpoint on `BK4819_GetRSSI` never fires at all: in
-this idle state the firmware does not read RSSI, so the missing S-meter is not the
-model withholding a value. The receive state machine has to be entered first, and the
-squelch interrupt is one input to that rather than the switch.
+**Where it actually stands, after the read-path fix.** With reads correct, the
+handshake demonstrably works — measured `RAISE pending=0004` followed by
+`ACK delivering flags=0004`, the right bit, collected by the firmware, and `REG_0C`
+back to `0x0000` afterwards so nothing hangs. That part is solved.
 
-Both attempts are reverted and the committed model has no squelch logic. Do not resume
-this without a concrete reason to think the state machine can be entered — three
-rounds of increasingly precise instrumentation each ended at "the firmware is not
-asking", not at a fault in the device.
+`g_SquelchLost` still ends up 0, and the S-meter still does not appear. What the
+instrumentation shows is a timing shape rather than a wrong value:
+
+- Announce **once** on the transition and the firmware collects it during startup,
+  before `g_SquelchLost` leads anywhere, then never hears again.
+- Announce on **every** poll and the request bit is re-armed inside the firmware's own
+  collection loop — which re-reads `REG_0C` as its condition and has no timeout — so it
+  spins forever.
+- Announce **periodically** (every 64th poll) and both of those are avoided: the loop
+  always drains, the news repeats. `REG_0C` reads clear, no hang. `g_SquelchLost` is
+  still 0.
+
+So the remaining gap is not the interrupt. The radio has to be in a state where
+`CheckForIncoming` runs and acts on the flag, and in this idle configuration
+(`fn=5 idle=1`, power save, dual watch, squelch level 1) it is not. Consistent with a
+breakpoint on `BK4819_GetRSSI` never firing at all.
+
+All squelch work is reverted; the committed model has none. The read-path fix is
+committed separately and stands on its own. Before resuming, establish how to get the
+firmware into a receiving state at all — that is the actual blocker, and it is above
+the device model.
 
 Four measurement mistakes made this take far longer than the code involved. All four
 produced a confident, wrong conclusion:

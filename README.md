@@ -80,6 +80,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_freq_entry.py     a typed frequency takes effect and persists
       test_serial_rx.py      the firmware answers programming commands
       test_bk4819.py         BK4819 register interface, RSSI not stuck at zero
+      test_bk4819_readback.sh  register reads come back bit-aligned
       lib_kill_emulator.sh   cleanup that only ever kills emulators
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
@@ -124,6 +125,7 @@ Then check the build actually works, which takes about a minute:
     python3 tools/test_freq_entry.py
     python3 tools/test_serial_rx.py
     python3 tools/test_bk4819.py
+    bash tools/test_bk4819_readback.sh
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean
