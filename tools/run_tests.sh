@@ -66,6 +66,7 @@ cd "$HERE"
 # First, that this script itself reports failures. A runner that silently counts every
 # test as passing is worse than no runner, because it gets trusted.
 run "runner self-check"   bash "$HERE/test_run_tests.sh"
+run "docs match code"     python3 "$HERE/check_docs.py"
 run "unit: model helpers" python3 -m unittest discover -p 'test_uvk5*.py' -q
 run "unit: web UI"        python3 -m unittest test_webui -q
 

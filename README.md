@@ -96,6 +96,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_battery.py        battery level and low-battery follow the ADC
       test_millis.py         millis() advances, so timeouts can expire
       test_spectrum.py       RSSI depends on tuning, not a constant
+      check_docs.py          the docs' claims still match the code
       run_tests.sh           runs all of the above, build-checked first
       test_run_tests.sh      that the runner actually notices failures
       lib_kill_emulator.sh   cleanup that only ever kills emulators

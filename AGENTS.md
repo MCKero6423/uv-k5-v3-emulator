@@ -488,6 +488,28 @@ stray bytes that make the log a "binary file" to grep, which swallows the summar
 Emulator tests boot their own QEMU on private ports and take 20-30 s each, so they do
 not disturb a running `run.sh` or web UI session.
 
+### Keeping the docs honest
+
+    python3 tools/check_docs.py     # also runs as part of run_tests.sh -q
+
+Documentation rots quietly, and reading it does not find that. Translating everything
+into Chinese turned up four claims that had already drifted: the endpoint table was
+missing three routes, the modelled-peripheral list omitted TIM2, the audit table still
+called TIM a stub after TIM2 was modelled, and neither README listed several library
+modules. All four were found by comparing against the source, none by proofreading.
+
+So the comparison is mechanical now. It checks that every tool a README names exists,
+that every test in `run_tests.sh` is documented in both languages, that internal `.md`
+links resolve, that the translation pairs have matching heading structure, that the
+memory-map addresses match the model's `#define`s, and that documented firmware
+`file:line` references still point at what the prose claims.
+
+One caution, from writing it. An early version compared firmware constants with a regex
+that took the first number on the line, so `key_debounce_10ms = 20 / 10` read as 20 and
+the checker declared the docs wrong for saying 2. **The docs were right and the checker
+was broken.** A checker that cries wolf gets ignored, so anything it cannot verify
+unambiguously is left out rather than guessed at.
+
 ### Counting distinct frames proves less than it looks
 
 Worth knowing before writing any test that watches the screen.

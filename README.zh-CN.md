@@ -84,6 +84,7 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
       test_battery.py        电量与低电告警跟随 ADC
       test_millis.py         millis() 会递增，超时才可能到期
       test_spectrum.py       RSSI 取决于调谐位置，不是常数
+      check_docs.py          文档的断言是否仍与代码一致
       run_tests.sh           跑上面全部，先检查构建
       test_run_tests.sh      验证 runner 真的能发现失败
       lib_kill_emulator.sh   只杀模拟器的清理逻辑
