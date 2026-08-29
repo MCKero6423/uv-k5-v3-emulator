@@ -459,6 +459,30 @@ Two constraints are not negotiable, both from untimed spin loops in the firmware
   measuring. Not hypothetical: the first test run decoded 48 registers correctly and
   still reported RSSI as 0 for precisely this reason.
 
+### Counting distinct frames proves less than it looks
+
+Worth knowing before writing any test that watches the screen.
+
+Once the receiver reports a varying RSSI, the meter and its dBm readout redraw
+constantly. So "are consecutive frames different" returns yes on a **completely parked
+radio**. A first attempt at checking that scanning still worked scored 8/8 distinct
+frames and established nothing at all.
+
+Compare the rows that answer the actual question instead. The framebuffer is 128x64 as
+8 pages of 128 bytes, page *p* covering rows 8p..8p+7:
+
+    page 0      status line
+    pages 1-2   upper VFO, large frequency digits
+    page 3      upper VFO sub-line
+    pages 5-7   lower VFO
+
+`tools/test_scan.py` compares pages 1-2, which only change when the radio retunes: 6
+distinct tunings over 6 samples. That matters because an always-busy receiver is a
+plausible way to stall a scan, and the S-meter work made the receiver always busy.
+
+Page 4 is *not* the meter row, incidentally — it stayed byte-identical across all six
+samples while the frequency changed.
+
 ### PTT, and the transmit level bar
 
 PTT is not a matrix key. `GPIO_IsPttPressed` reads PB10 directly

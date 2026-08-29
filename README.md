@@ -85,6 +85,7 @@ keypresses silently stop working. Run the test after touching that code;
       test_bk4819_readback.sh  register reads come back bit-aligned
       test_smeter.py         the S-meter reads a signal when monitoring
       test_ptt.py            PTT keys the radio and releases cleanly
+      test_scan.py           a busy band does not stall a scan
       lib_kill_emulator.sh   cleanup that only ever kills emulators
       webui.py               web remote control: live LCD plus clickable keypad
       dn42_firewall.sh       restrict the web UI port to DN42 sources
@@ -132,6 +133,7 @@ Then check the build actually works, which takes about a minute:
     bash tools/test_bk4819_readback.sh
     python3 tools/test_smeter.py
     python3 tools/test_ptt.py
+    python3 tools/test_scan.py
 
 This matters more than it looks. The keypad can break silently under -O2 without
 any compiler warning -- see the `volatile` note in [Status](#status) -- so a clean
