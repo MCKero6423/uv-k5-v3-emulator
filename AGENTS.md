@@ -487,16 +487,21 @@ was never true and 1719 polls saw a flag the guest could not act on. Every one o
 those rounds was blamed on timing or gating. **When several independent attempts fail
 the same way, suspect the shared transport, not the logic on top of it.**
 
-### The squelch interrupt: attempted, backed out
+### The squelch interrupt and the S-meter: five attempts, then it worked
 
-Scanning works — long-press `*` and the frequency really does step, 6 distinct frames
-over 7 seconds — but the S-meter never appears, because `ui/main.c:2370` only draws it
-when `FUNCTION_IsRx()`, and that needs `gCurrentFunction` to be in a receiving state.
-Reaching it means the chip reporting a squelch opening, not just a healthy RSSI.
+**This works now** (`e6cebed`) — skip to the end for the conclusion. The four failed
+attempts are kept because each produced a confident wrong diagnosis, and the pattern
+of how they failed is the useful part.
 
-The mechanism is clear enough: `REG_0C` bit 0 says an interrupt is pending, the
-firmware writes `REG_02` to acknowledge and reads it back for the flags, and
-`sqlFound` is bit 3 (the bitfield is spelled out at `app/app.c:915`).
+Scanning worked early on: long-press `*` and the frequency really does step, 6 distinct
+frames over 7 seconds. The S-meter did not, because `ui/main.c:2370` only draws it when
+`FUNCTION_IsRx()`, and that needs `gCurrentFunction` in a receiving state — which takes
+the chip reporting a squelch opening, not just a healthy RSSI.
+
+The mechanism looked clear: `REG_0C` bit 0 says an interrupt is pending, the firmware
+writes `REG_02` to acknowledge and reads it back for the flags, and `sqlFound` is bit 3
+(the bitfield is at `app/app.c:915`). Both the bit choice and that reading of the
+mechanism turned out to be wrong.
 
 I implemented it — raise `sqlFound` once when the firmware enables interrupts — and
 **backed it out**. The guest kept running, but `REG_0C` bit 0 was still set afterwards:
@@ -549,32 +554,39 @@ suppresses that is inside the inlined loop, past the gate. Gating the model on
 `REG_30` (zeroed by `BK4819_Sleep`) does not help either — the chip is awake when the
 model is asked while the firmware still reports `gRxIdleMode=1`.
 
-**Where it actually stands, after the read-path fix.** With reads correct, the
-handshake demonstrably works — measured `RAISE pending=0004` followed by
-`ACK delivering flags=0004`, the right bit, collected by the firmware, and `REG_0C`
-back to `0x0000` afterwards so nothing hangs. That part is solved.
+**Resolved in `e6cebed`.** The meter reads: `-53` dBm, `+40` over S9, nine of thirteen
+segments, `MONI`, and a running receive timer. The numbers agree — S9 is −93 dBm on
+UHF, so −53 really is S9+40.
 
-`g_SquelchLost` still ends up 0, and the S-meter still does not appear. What the
-instrumentation shows is a timing shape rather than a wrong value:
+Three things had to be right, and the order they were found in was the difficult part.
 
-- Announce **once** on the transition and the firmware collects it during startup,
-  before `g_SquelchLost` leads anywhere, then never hears again.
-- Announce on **every** poll and the request bit is re-armed inside the firmware's own
-  collection loop — which re-reads `REG_0C` as its condition and has no timeout — so it
-  spins forever.
-- Announce **periodically** (every 64th poll) and both of those are avoided: the loop
-  always drains, the news repeats. `REG_0C` reads clear, no hang. `g_SquelchLost` is
-  still 0.
+*The flag is `SQUELCH_LOST`, bit 2.* Per `app/app.c:1027`, "squelch lost" is what sets
+`g_SquelchLost = true`, meaning a signal is present. `SQUELCH_FOUND` reads like "found
+a signal" and means the opposite. Bit definitions are in
+`App/driver/bk4819-regs.h:290`.
 
-So the remaining gap is not the interrupt. The radio has to be in a state where
-`CheckForIncoming` runs and acts on the flag, and in this idle configuration
-(`fn=5 idle=1`, power save, dual watch, squelch level 1) it is not. Consistent with a
-breakpoint on `BK4819_GetRSSI` never firing at all.
+*Announcing has to be rate-limited* — here every 64th poll. Announce once and the
+firmware collects it during startup, before the flag leads anywhere. Announce on every
+poll and the request bit is re-armed inside the firmware's own collection loop, which
+uses `REG_0C` as its condition and has no timeout, so it never exits. Periodic
+satisfies both: the loop always drains, and the news repeats until it matters.
 
-All squelch work is reverted; the committed model has none. The read-path fix is
-committed separately and stands on its own. Before resuming, establish how to get the
-firmware into a receiving state at all — that is the actual blocker, and it is above
-the device model.
+*The way in is not the interrupt at all.* The radio idles in power save and does not
+act on squelch there — which is why a breakpoint on `BK4819_GetRSSI` never fired.
+`ACTION_Monitor` skips squelch entirely: `app/app.c:482` picks `FUNCTION_MONITOR` over
+`FUNCTION_RECEIVE` whenever `gMonitor` is set, and `settings.c:263` defaults an
+out-of-range stored action to `ACTION_OPT_MONITOR` — which blank flash (`0xFF`) is. So
+**SIDE1 short-press engages monitor on a pristine image**:
+
+    before:  fn=5 idle=1 monitor=0      (FUNCTION_POWER_SAVE)
+    after:   fn=2 idle=0 monitor=1
+
+Gate on `RX_DSP` (`REG_30` bit 0) rather than the whole register being zero: TX and
+tone paths leave other bits set with `RX_DSP` clear and would otherwise look like a
+live receiver.
+
+`tools/test_smeter.py` covers the path end to end and compares lit-pixel counts rather
+than matching pixels, so an unrelated UI change cannot produce a mysterious failure.
 
 Four measurement mistakes made this take far longer than the code involved. All four
 produced a confident, wrong conclusion:
