@@ -641,21 +641,25 @@ the multiboot menu reads firmware slots rather than apps. **The answer was writt
 the flasher's own translation file**, not in the firmware source I had been reading -- so
 when a feature's entry point is missing, the host tool that installs it is the document.
 
-**"Init ... DO NOT POWER OFF" that never ends is a pending multiboot state marker.** Measured
-on a real image: `0x100000` held `FMP3` next to a committed slot 0, so the factory bootloader
-reflashed the internal flash from that slot on every power-on and reset again -- a restore loop.
-The firmware's own banner reappeared once a cycle in the serial log (7 -> 8 in 25 s) while the
-screen never changed. Clearing the two marker sectors (`0x100000..0x101FFF`, which stops just
-before the app region at `0x102000`, so installed apps are untouched) ended it: the banner count
-stopped rising and the radio booted once and stayed.
+**A blank screen after a firmware upload: check the multiboot state, and roll the image back --
+do not edit state by hand.** Measured here: an image whose `FMP3` marker at `0x100000` recorded one
+identity (size 120832, CRC `0x4D87CE48`) while `-kernel` loaded a different build makes the firmware
+decide the running image is not the one its state expects, so it takes the restore/adopt path and
+draws nothing: the panel's whole 1024 bytes stayed zero while the serial banner printed happily.
+Replacing the working copy with the untouched dump brought the picture straight back (485 of 1024
+bytes lit) and left the three installed apps reinstallable.
 
-That loop explained a second surprise: edits made through the page vanished. The emulator writes
-its in-memory image back when it exits, and the looping guest's copy was older than the file, so
-powering it off overwrote what had just been installed. With the loop gone the same installs
-survive a power cycle -- verified by installing, powering off, seeing them still listed, powering
-on, seeing them still listed, and having the radio answer `0x0730` with all three. **A stale
-write-back is worth suspecting whenever an edit "does not stick"**, and a guest that is quietly
-rebooting is exactly how one happens.
+Two corrections to what an earlier version of this section claimed. **The marker is not a pending
+flag**: decode it and `generation`, `image_size`, `image_crc32`, `firmware_slot`/`slot_inv`,
+`config_bank`/`bank_inv` and `state_crc32` all check out (`0x661286F1` over the first 20 bytes) --
+it is an ordinary state record. And **clearing the marker sectors is not a fix**: it was tried twice
+(a whole 8 KiB, then only the 24-byte headers), after which the firmware took the `MB_MARK_MISSING`
+= "fresh radio" path, adopted the running firmware, drew nothing while doing it, and had the marker
+written back by its own write-back anyway. Rolling the image back is what worked.
+
+**A stale write-back is still worth suspecting when an edit "does not stick"**: the emulator writes
+its in-memory image back on exit, so an edit made while a guest was live can be overwritten by the
+copy that guest was holding -- which is also how the marker reappeared after being cleared.
 
 ## The keypad: two real bugs, both fixed
 
