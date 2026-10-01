@@ -1056,6 +1056,21 @@ struct BK4819State {
     bool     skip_falling;    /* the command byte's trailing edge, not a data bit */
 
     /*
+     * Diagnostic probe (UVK5_BK4819_PROBE) -- what this read presents, reassembled from
+     * the bits clocked out, because the model's own register file is right by
+     * construction and says nothing about what the guest was handed.
+     *
+     * It logs "sent" (the sixteen bits clocked out) against "reg" (the register). On the
+     * working model every read agrees: 1566 of 1566. That agreement is *not* proof that it
+     * would catch the historical left-shift -- removing the skip_falling fix below leaves
+     * the reassembled word unchanged, so this is not the point the guest samples at. Until
+     * that is understood, tools/test_bk4819_readback.sh remains the guard and
+     * tools/test_bk4819_readback.py is a draft.
+     */
+    uint32_t out_seen;
+    unsigned out_bits;
+
+    /*
      * Interrupt flags awaiting collection, held apart from REG_02 because the firmware
      * writes that register to acknowledge and then reads it back for the flags, so the
      * value it reads has to survive its own clearing write.
@@ -1370,6 +1385,8 @@ static void bk4819_set_scl(void *opaque, int line, int level)
                         bk4819_eval_receiver(s);
                     }
                     s->shift_out = s->regs[s->cmd];
+                    s->out_seen = 0;
+                    s->out_bits = 0;
                     /*
                      * The command byte's own trailing falling edge must not consume
                      * bit 15. Each firmware bit is read/raise/lower, so the eighth
@@ -1429,6 +1446,25 @@ static void bk4819_set_scl(void *opaque, int line, int level)
     if (falling && s->skip_falling) {
         s->skip_falling = false;
     } else if (falling && s->have_cmd && s->reading) {
+        /*
+         * The bit being presented right now is what the guest samples. Reassemble the
+         * sixteen of them so the probe can report the word the guest received.
+         */
+        s->out_seen = (s->out_seen << 1) | ((s->shift_out >> 15) & 1u);
+        s->out_bits++;
+        if (s->out_bits == 16) {
+            const char *bk_probe = g_getenv("UVK5_BK4819_PROBE");
+            if (bk_probe) {
+                FILE *bf = fopen(bk_probe, "a");
+                if (bf) {
+                    fprintf(bf, "READ cmd=%02x sent=%04x reg=%04x skip=%d\n",
+                            s->cmd, (unsigned)s->out_seen, s->regs[s->cmd],
+                            s->skip_falling ? 1 : 0);
+                    fclose(bf);
+                }
+            }
+            s->out_bits = 0;
+        }
         /*
          * Advance on the falling edge so the next bit is settled before the guest
          * samples it. BK4819_ReadU16 sets SCL low, reads, then sets it high.

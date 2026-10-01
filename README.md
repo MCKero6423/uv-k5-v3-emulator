@@ -401,6 +401,15 @@ slot and resets. Both halves are reachable from the page.
 - `tools/uvk5_slots.py` does the same offline: write a slot into a flash image, and print
   what each slot holds.
 
+### The readback guard, and a draft that is not one yet
+
+`tools/test_bk4819_readback.sh` guards the reading-shift bug -- a register read delivering its
+value one bit off. It needs an ARM gdb, so it only runs where one is installed.
+`tools/test_bk4819_readback.py` is the portable replacement in progress, and **it is not the
+guard yet**: it passes on the working model, but removing the fix does not make it fail, so it
+does not observe what the guest actually samples. It is deliberately not registered in
+`tools/run_tests.sh`, so that a proven guard is not replaced by an unproven one. The
+observation point has to move to the driver's sampling edge before it takes over.
 ### Which build renders correctly, and how that is decided
 
 The page draws the display controller's **own memory**, not the firmware's framebuffer, so it
