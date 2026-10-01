@@ -154,7 +154,10 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
 
     # One background grabber for every client. client may be None: the emulator
     # can be powered off, and the page still has to load.
-    pump = FramePump(client, frame_addr, status_addr, fps=TARGET_FPS, scale=scale)
+    pump = FramePump(client, frame_addr, status_addr, fps=TARGET_FPS, scale=scale,
+                     on_fallback=lambda note: log.add(
+                         "qemu", "panel unavailable, drawing from guest RAM at "
+                                 f"0x{frame_addr:08X}: {note}"))
     pump.start()
     app.config["PUMP"] = pump
     app.config["SUPERVISOR"] = supervisor
@@ -270,7 +273,34 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
             # The emulator can die under us; that is a state to report, not a 500.
             return jsonify(powered=False, status="unreachable", error=str(exc))
         return jsonify(powered=True, speaker=speaker_on(),
-                       panel=panel_state(), firmware=firmware_info(), **info)
+                       panel=panel_state(), firmware=firmware_info(),
+                       frame_source=pump.source()[0], **info)
+
+    @app.get("/api/panel")
+    def api_panel():
+        """The display controller's own memory, and where /frame.png came from.
+
+        /frame.png prefers the panel and falls back to guest RAM when the panel model
+        is not there. The fallback needs the addresses of *that* build's buffers, so
+        it is the path that can look right and be offset at the same time -- and a
+        caller cannot tell which it got from the picture. This says which, gives the
+        reason for a fallback, and hands back the controller's own bytes so the two
+        can be compared without guessing.
+        """
+        source, note = pump.source()
+        body = {"source": source, "note": note,
+                "frame_addr": frame_addr, "status_addr": status_addr}
+        target = active_client()
+        if target is None:
+            return jsonify(body, powered=False)
+        try:
+            body["gram"] = target.command("qom-get", path=PANEL_PATH, property="gram")
+            body["invert"] = bool(target.command("qom-get", path=PANEL_PATH,
+                                                 property="invert"))
+            body["bytes"] = len(body["gram"]) // 2
+        except Exception as exc:
+            body["panel_error"] = str(exc)
+        return jsonify(body)
 
     @app.get("/api/firmware")
     def api_firmware():

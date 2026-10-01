@@ -461,6 +461,38 @@ The general lesson: when a firmware's mode is chosen from a byte in RAM, the tri
 input pin -- it is whatever wrote that byte before resetting. Find the writer in the source
 (`0x05DD` here) and the `#ifdef` around it, and you have the whole condition.
 
+### Two pixels bugs behind "the other firmware looks shifted"
+
+Both were found by making the page *say where its picture came from*, and both had been
+surviving because the wrong output looked plausible.
+
+**The fallback that quietly drew every frame.** `uvk5_stream.py` used `STATUS_BYTES`
+without importing it, so the panel branch raised `NameError` on every frame and a bare
+`except Exception: pass` swallowed it. Every screen the page drew came from guest RAM at
+one firmware build's addresses: right-looking for that build, plausible and offset for any
+other. Found by reporting the source and the reason (`/api/panel` answered
+`source: framebuffer, note: NameError: name 'STATUS_BYTES' is not defined`). With the panel
+path working, the page's `/frame.png` matches the controller's own memory 8192/8192;
+before the fix it was 5594/8192 against the same memory. `tools/test_uvk5_stream.py` now
+asserts that the panel wins when it is reachable, and that a fallback is announced with its
+reason.
+
+**The column counter wrapped at 128 instead of 132.** The controller has 132 column
+drivers and the glass shows 128 of them starting at column 4, which is why the model stores
+pixels at `col - 4`. The counter was masked with `& 0x7f`, so addresses 128..131 came back
+as 0..3, fell outside the `col >= 4` store, and were dropped: **every row lost its last four
+pixels**. The battery icon lives in exactly those columns, so the symptom was a battery in
+the wrong place and a picture that "looked shifted" on builds that draw to column 127 --
+while the localised build, whose rightmost four columns are blank anyway, looked fine. That
+is why this read as a firmware-specific problem. Measured, before and after: filling a page
+with `0xFF` left columns 124..127 blank; now they light (10/10/12/7 lit across them), and
+the same firmware's frame matches the panel memory 8192/8192.
+
+The lesson in both cases is the same one this file keeps repeating: **a path that silently
+substitutes a different source turns a hard error into a plausible wrong answer**, and a
+byte that is off by four is invisible until something that matters lives in those four
+columns. Report the source, and test that the preferred path is actually taken.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and

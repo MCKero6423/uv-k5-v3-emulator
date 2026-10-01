@@ -17,12 +17,24 @@ looks live.
 import threading
 import time
 
-from uvk5_lcd import FrameGrabber, default_spool_dir, encode_png, unpack
+# STATUS_BYTES is not decoration: _grab() splits the controller's memory into the
+# status line and the frame with it. It was missing from this import for the whole
+# life of the panel path, so the panel branch raised NameError on every frame, the
+# bare except below swallowed it, and every picture the page ever drew came from the
+# guest-RAM fallback instead -- which needs *that build's* buffer addresses. With the
+# CN addresses and a CN firmware that looked right; with any other firmware the screen
+# was plausible and offset, which is exactly how it was reported.
+from uvk5_lcd import STATUS_BYTES, FrameGrabber, default_spool_dir, encode_png, unpack
 
 
 class FramePump:
     def __init__(self, client, frame_addr: int, status_addr: int,
-                 fps: int = 15, scale: int = 4, spool_dir: str = None):
+                 fps: int = 15, scale: int = 4, spool_dir: str = None,
+                 on_fallback=None):
+        # Called once with the reason the first time a frame has to come from guest RAM.
+        # It used to be swallowed whole, which is how a NameError in the panel branch
+        # went unnoticed for as long as the fallback kept producing plausible pictures.
+        self._on_fallback = on_fallback
         self._frame_addr = frame_addr
         self._status_addr = status_addr
         # Resolved by FrameGrabber: /dev/shm on Linux, the temp directory on
@@ -36,6 +48,13 @@ class FramePump:
         self._png = None
         self._raw = None
         self._generation = 0
+        # Which memory the pixels came from. The panel is preferred and is the only
+        # source that is firmware-independent; the guest-RAM fallback needs that
+        # build's own buffer addresses, so getting it wrong shows up as a picture
+        # that is plausible but offset. Reporting it is what turns "the screen looks
+        # wrong" into "it came from the fallback, and here is why".
+        self._source = None
+        self._note = None
         self._stop = threading.Event()
         self._thread = None
 
@@ -91,6 +110,11 @@ class FramePump:
                 self._stop.wait(slack)
 
 
+    def source(self):
+        """(which memory the last frame came from, why the fallback happened)."""
+        with self._lock:
+            return self._source, self._note
+
     def _grab(self, grabber):
         """One frame: (status, frame, pixels), from the panel if it is there.
 
@@ -105,8 +129,21 @@ class FramePump:
         try:
             pixels = grabber.panel_pixels()
             gram = grabber.panel_gram()
+            self._source = "panel"
+            self._note = None
             return gram[:STATUS_BYTES], gram[STATUS_BYTES:], pixels
-        except Exception:
+        except Exception as exc:
+            # Remember the first reason rather than overwriting it every frame: the
+            # cause does not change while the emulator runs, and the first one is
+            # the informative one.
+            if self._source != "framebuffer":
+                self._note = "%s: %s" % (type(exc).__name__, exc)
+                if self._on_fallback is not None:
+                    try:
+                        self._on_fallback(self._note)
+                    except Exception:
+                        pass
+            self._source = "framebuffer"
             status, frame = grabber.raw()
             return status, frame, unpack(status, frame)
     def latest(self):

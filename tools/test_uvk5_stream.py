@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 
+from uvk5_lcd import LCD_HEIGHT, LCD_WIDTH, STATUS_BYTES, TOTAL_ROWS, unpack
 from uvk5_stream import FramePump
 
 
@@ -128,6 +129,67 @@ class TestFramePump(unittest.TestCase):
         self.assertIsNone(pump.latest())
         pump.rebind(CountingClient())
         self.assertTrue(wait_for_frame(pump), "did not resume after rebind")
+
+
+class FakePanel:
+    """A grabber whose panel works, and whose guest RAM must never be touched.
+
+    read() raises, so any test that silently takes the fallback fails loudly instead of
+    comparing two wrong pictures -- which is how the bug below stayed invisible: the
+    fake client used by the tests above answers memsave and nothing else, so the panel
+    branch failed there too, the bare except swallowed it, and every one of them was
+    really exercising the fallback.
+    """
+
+    def __init__(self):
+        self.gram = bytes((i * 7) & 0xFF for i in range(TOTAL_ROWS * LCD_WIDTH))
+
+    def panel_gram(self):
+        return self.gram
+
+    def panel_pixels(self):
+        return unpack(self.gram[:STATUS_BYTES], self.gram[STATUS_BYTES:])
+
+    def raw(self):
+        raise AssertionError("guest RAM was read while the panel was available")
+
+
+class TestFrameSource(unittest.TestCase):
+    """Which memory the page draws is not a detail -- it decides whose screen is right.
+
+    The panel is the only firmware-independent source: every build pushes pixels through
+    the same controller, while guest RAM is correct only for the build whose buffer
+    addresses were passed in. So when the panel is reachable it must be used.
+
+    uvk5_stream.py used STATUS_BYTES without importing it. The panel branch therefore
+    raised NameError on every frame, a bare except swallowed it, and every screen the
+    page drew came from guest RAM at one firmware's addresses -- right-looking for that
+    firmware, plausible and offset for any other. These two tests fail on that code.
+    """
+
+    def test_the_panel_is_used_when_it_is_there(self):
+        pump = FramePump(None, 0, 0)
+        status, frame, pixels = pump._grab(FakePanel())
+        self.assertEqual(pump.source()[0], "panel",
+                         "the panel is reachable, so guest RAM must not be used")
+        self.assertIsNone(pump.source()[1])
+        self.assertEqual(len(status), STATUS_BYTES)
+        self.assertEqual(len(frame), TOTAL_ROWS * LCD_WIDTH - STATUS_BYTES)
+        # unpack() returns one entry per LCD line, not per page: eight pages of eight.
+        self.assertEqual(len(pixels), LCD_HEIGHT)
+        self.assertEqual(len(pixels[0]), LCD_WIDTH)
+
+    def test_a_broken_panel_falls_back_and_says_why(self):
+        notes = []
+        pump = FramePump(None, 0, 0, on_fallback=notes.append)
+        broken = FakePanel()
+        broken.panel_gram = lambda: (_ for _ in ()).throw(RuntimeError("no panel model"))
+        broken.raw = lambda: (b"\x00" * STATUS_BYTES,
+                              b"\x00" * (TOTAL_ROWS * LCD_WIDTH - STATUS_BYTES))
+        pump._grab(broken)
+        self.assertEqual(pump.source()[0], "framebuffer")
+        self.assertIn("no panel model", pump.source()[1])
+        self.assertEqual(len(notes), 1, "the fallback is announced once, with its reason")
 
 
 if __name__ == "__main__":

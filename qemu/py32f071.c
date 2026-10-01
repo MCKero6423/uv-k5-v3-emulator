@@ -814,7 +814,7 @@ static uint8_t st7565_xfer(void *opaque, uint8_t out)
     {
         const char *panel_probe = g_getenv("UVK5_PANEL_PROBE");
         static unsigned panel_probe_n;
-        if (panel_probe && panel_probe_n < 600) {
+        if (panel_probe && panel_probe_n < 40000) {
             FILE *f = fopen(panel_probe, "a");
             if (f) {
                 fprintf(f, "PANEL a0=%d cs=%d page=%d col=%d byte=%02x\n",
@@ -833,7 +833,17 @@ static uint8_t st7565_xfer(void *opaque, uint8_t out)
         if (s->col >= 4 && s->col < 132) {
             s->gram[s->page & 7][s->col - 4] = out;
         }
-        s->col = (s->col + 1) & 0x7f;
+        /*
+         * The controller's column counter runs 0..131 -- it has 132 column drivers,
+         * and the glass shows 128 of them starting at 4, which is why the store above
+         * subtracts 4. Masking the counter to seven bits made it wrap at 128 instead:
+         * the four bytes addressed 128..131 were then re-read as 0..3, fell outside
+         * the store, and were dropped. Every row lost its last four pixels -- and the
+         * battery icon lives in the rightmost columns, so the symptom was a wrong
+         * battery and a picture that looked shifted, on builds that draw to column
+         * 127. Measured: filling a whole page with 0xFF left columns 124..127 blank.
+         */
+        s->col = (s->col + 1) % 132;
         return 0xff;
     }
 
