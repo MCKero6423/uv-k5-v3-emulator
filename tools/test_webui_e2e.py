@@ -25,8 +25,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SIM = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
-QEMU = os.path.expanduser("~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm")
-ELF = os.path.expanduser("~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import uvk5_testenv
+
+QEMU = uvk5_testenv.qemu()
+ELF = uvk5_testenv.firmware()
 FLASH = os.path.join(SIM, "assets", "flash.img")
 QMP = "/tmp/uvk5-webui-e2e.sock"
 HTTP_PORT = 8099

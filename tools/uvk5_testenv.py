@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Where the emulator tests find a QEMU and a firmware, and what to say when they cannot.
 
-The emulator tests used to name one developer's build directory:
-
-    QEMU = os.path.expanduser("~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm")
-    ELF  = os.path.expanduser("~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf")
+The emulator tests used to name one developer's build directory -- a QEMU under their
+home, and one firmware build from a source tree outside this repository --
 
 which is fine on the machine they were written on and useless anywhere else -- and a
 missing file used to be a hard failure, so a checkout without that build could never

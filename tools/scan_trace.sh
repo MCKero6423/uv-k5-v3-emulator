@@ -6,7 +6,9 @@
 # the firmware looks, versus the rows going low but the debounce rejecting them.
 set -uo pipefail
 
-ELF="${ELF:-$HOME/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf}"
+# shellcheck source=tools/uvk5_elf.sh
+. "$(dirname "$0")/uvk5_elf.sh"
+ELF=$(uvk5_find_elf) || { echo "SKIP  no firmware found; set ELF or put one in assets/firmware" >&2; exit 0; }
 KEY="${1:-MENU}"
 SAMPLES="${2:-10}"
 

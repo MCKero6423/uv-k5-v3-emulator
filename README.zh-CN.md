@@ -102,6 +102,7 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
       uvk5_stream.py         /stream 背后的抓帧泵
       uvk5_supervisor.py     启动、停止、以及故障后恢复模拟器进程
       test_kill_emulator.sh  清理逻辑绝不会杀掉无关进程
+uvk5_elf.sh            探针脚本从哪里找固件（环境变量，然后本仓库）
       （另有一批临时探针脚本 —— scan_trace.sh、gpio_watch.py 等 ——
        留着是因为随手就能用，不是因为它们打磨过）
     harness/, stubs/, shim/, tests/   CW 时序链的宿主机构建（阶段 A）

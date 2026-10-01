@@ -1164,6 +1164,29 @@ pollFirmware();
 </body></html>"""
 
 
+def _default_qemu():
+    """A QEMU to spawn: the environment, then PATH. Never one developer's build dir."""
+    try:
+        import uvk5_testenv
+        return str(uvk5_testenv.qemu() or "qemu-system-arm")
+    except Exception:
+        return "qemu-system-arm"
+
+
+def _default_firmware():
+    """Whatever firmware this checkout has, or nothing.
+
+    Nothing is the normal case now: a firmware can be uploaded from the page, and the page
+    says when one is not loaded. tools/uvk5_testenv.py looks in assets/firmware and work.
+    """
+    try:
+        import uvk5_testenv
+        firmware = uvk5_testenv.firmware()
+        return str(firmware) if firmware else None
+    except Exception:
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--qmp", default="/tmp/uvk5-qmp.sock")
@@ -1178,12 +1201,14 @@ def main() -> int:
                     help="attach to an emulator started elsewhere (run.sh) "
                          "instead of managing one. Off is then refused, since "
                          "this server did not start that process.")
-    ap.add_argument("--qemu", default=os.path.expanduser(
-        "~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm"))
+    # A path or a bare name: Popen resolves a bare name through PATH. The machine is
+    # built from this checkout, not from one developer's build directory.
+    ap.add_argument("--qemu", default=_default_qemu())
     # Named --elf for history; any .bin or .elf works, and its shape is read out
     # of the file rather than assumed. More can be uploaded from the page.
-    ap.add_argument("--elf", "--firmware", dest="elf", default=os.path.expanduser(
-        "~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf"))
+    # Nothing local by default: upload a firmware from the page, which says so when
+    # none is loaded. tools/uvk5_testenv.py finds one in assets/firmware or work.
+    ap.add_argument("--elf", "--firmware", dest="elf", default=_default_firmware())
     ap.add_argument("--flash", default=os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "assets", "flash.img"))

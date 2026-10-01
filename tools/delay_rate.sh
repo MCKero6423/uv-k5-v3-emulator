@@ -5,7 +5,9 @@
 # both twice gives the rate and an estimate of how long the delay will take.
 set -uo pipefail
 
-ELF="${ELF:-$HOME/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf}"
+# shellcheck source=tools/uvk5_elf.sh
+. "$(dirname "$0")/uvk5_elf.sh"
+ELF=$(uvk5_find_elf) || { echo "SKIP  no firmware found; set ELF or put one in assets/firmware" >&2; exit 0; }
 GAP="${1:-4}"
 SCRIPT=$(mktemp --suffix=.gdb)
 trap 'rm -f "$SCRIPT"' EXIT

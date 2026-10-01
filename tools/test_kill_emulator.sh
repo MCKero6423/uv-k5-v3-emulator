@@ -46,8 +46,9 @@ kill "$decoy" "$decoy2" 2>/dev/null || true
 wait 2>/dev/null || true
 
 # And a real emulator must actually be terminated.
-QEMU="$HOME/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm"
-ELF="$HOME/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf"
+QEMU="${QEMU:-$(command -v qemu-system-arm || true)}"
+. "$HERE/uvk5_elf.sh"
+ELF=$(uvk5_find_elf || true)
 IMG=$(mktemp /tmp/kill-test-XXXX.img)
 gzip -dc "$HERE/../assets/pristine/flash-pristine.img.gz" > "$IMG"
 

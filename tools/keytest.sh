@@ -6,7 +6,7 @@
 # in the matrix wiring or the debounce.
 set -uo pipefail
 
-TOOLS="$HOME/uvk5-port/sim/tools"
+TOOLS="$(cd "$(dirname "$0")" && pwd)"
 KEY="${1:-MENU}"
 
 python3 - "$KEY" <<'PY'

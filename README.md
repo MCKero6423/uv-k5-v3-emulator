@@ -114,7 +114,8 @@ keypresses silently stop working. Run the test after touching that code;
       uvk5_stream.py         the MJPEG-style frame pump behind /stream
       uvk5_supervisor.py     starts, stops and recovers the emulator process
       test_kill_emulator.sh  cleanup never kills an unrelated process
-      (plus ad-hoc probe scripts -- scan_trace.sh, gpio_watch.py and friends --
+      uvk5_elf.sh            where the probe scripts find a firmware (env, then the checkout)
+(plus ad-hoc probe scripts -- scan_trace.sh, gpio_watch.py and friends --
        kept because they are quick to reach for, not because they are polished)
     harness/, stubs/, shim/, tests/   host build of the CW timing chain (stage A)
 

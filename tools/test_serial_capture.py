@@ -18,18 +18,25 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIM = os.path.dirname(HERE)
-QEMU = os.path.expanduser("~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm")
-ELF = os.path.expanduser("~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import uvk5_testenv
+
+QEMU = uvk5_testenv.qemu()
+ELF = uvk5_testenv.firmware()
 FLASH = os.path.join(SIM, "assets", "flash.img")
 LOG = "/tmp/uvk5-serial-test.log"
 QMP = "/tmp/uvk5-serial-test.sock"
 
 
 def main():
-    for path, what in ((QEMU, "QEMU binary"), (ELF, "firmware ELF"),
-                       (FLASH, "flash image")):
-        if not os.path.exists(path):
-            sys.exit(f"missing {what}: {path}")
+    missing = uvk5_testenv.missing([
+        (QEMU, "QEMU binary", "set QEMU=/path/to/qemu-system-arm, or put it on PATH"),
+        (ELF, "firmware", "run tools/fetch_firmware.py, or set ELF=..."),
+        (FLASH, "flash image", "run tools/make_flash.py"),
+    ])
+    if missing:
+        print("SKIP: %s" % missing)
+        return 0
     if os.path.exists(QMP):
         os.unlink(QMP)
 
