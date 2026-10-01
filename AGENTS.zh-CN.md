@@ -95,12 +95,13 @@ bootloader 区域，所以应用在它之后。`armv7m_load_kernel()` 之所以�
     tools/where.sh                # 执行到哪了
     tools/gpiob_dump.sh           # GPIOB 寄存器
     python3 tools/key.py MENU     # 注入一次按键
-    python3 tools/screenshot.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C --port 1234 --out screen.png
+    python3 tools/uvk5_buffers.py --qmp 127.0.0.1:4444   # 这份固件把它们放在哪
+    python3 tools/screenshot.py --frame-addr 0x... --status-addr 0x... \
+        --port 1234 --out screen.png
 
-截图用的地址在不同固件构建之间会变。这样拿到当前值：
-
-    arm-none-eabi-nm firmware.elf | grep -E 'gFrameBuffer|gStatusLine'
+截图用的地址在不同固件构建之间会变，而 `screenshot.py` 读的是 guest RAM，所以需要它们。
+`tools/uvk5_buffers.py` 会把控制器显存和 SRAM 做匹配、从正在运行的固件里找出来 —— 这里构建出来的
+镜像是**只有程序头的最小 ELF、没有符号表**，所以 `nm` 对它们无字可读（完整链接的 ELF 才有）。
 
 改完机器模型后重新构建：
 
@@ -113,8 +114,7 @@ bootloader 区域，所以应用在它之后。`armv7m_load_kernel()` 之所以�
 
 还有一个浏览器界面，通常是手动折腾固件最快的方式：
 
-    python3 tools/webui.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C     # 然后打开 http://127.0.0.1:8080/
+    python3 tools/webui.py            # 不需要地址：页面画的是面板显存
 
 关于它，有两点在这个仓库里干活时需要知道：
 
@@ -645,8 +645,9 @@ GCC 能看到全部调用者。如果一个模型的输出神秘地不起作用�
 
 参数检查本身也留下了一个教训。它的第一版只匹配到行尾，所以对一条这样换行的命令
 
-    python3 tools/screenshot.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C --port 1234 --out screen.png
+    python3 tools/uvk5_buffers.py --qmp 127.0.0.1:4444   # 这份固件把它们放在哪
+    python3 tools/screenshot.py --frame-addr 0x... --status-addr 0x... \
+        --port 1234 --out screen.png
 
 它只看到了 `--frame-addr`，别的都没看到 —— 9 个参数里查了 4 个，然后**报告一切干净**。
 **一个静默地只覆盖了自己所声称范围四分之一的检查，比没有检查更糟**，

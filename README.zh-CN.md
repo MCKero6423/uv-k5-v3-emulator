@@ -163,9 +163,9 @@ uvk5_elf.sh            探针脚本从哪里找固件（环境变量，然后本
         --elf assets/firmware/f4hwn.fieldops.v6.0.0.bin     # 然后打开 http://127.0.0.1:8080/
 
 `--frame-addr` 与 `--status-addr` 都是可选的，通常不传。页面画的是**显示控制器自己的显存** ——
-对任何固件那就是屏幕，不需要任何地址；这两个参数只服务 guest RAM 回落路径，而
-`tools/uvk5_buffers.py` 会从**正在运行的那份固件**里把它们找出来（命令行给了 `--frame-addr`
-就跳过搜索）。仓库里不保存任何一份构建的地址。
+对任何固件那就是屏幕，不需要任何地址；这两个参数只服务 guest RAM 回落路径，而地址是由
+`tools/uvk5_buffers.py` 从**正在运行的那份固件**里读出来的。自己在命令行给一个，就跳过这次搜索。
+仓库里不保存任何一份构建的地址。
 
 把任意 `.bin` 拖到页面上即可启动。页面上的 **Firmware slots** 表可以读写 flash 镜像里
 多系统固件的四个槽位，**Multiboot** 会按住 MENU 重启以进入多系统菜单——前提是那份构建
@@ -256,8 +256,9 @@ uvk5_elf.sh            探针脚本从哪里找固件（环境变量，然后本
     tools/run.sh                    # 启动机器
 
     tools/where.sh                  # 固件当前执行到哪里
-    python3 tools/screenshot.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C --port 1234 --out screen.png
+    python3 tools/uvk5_buffers.py --qmp 127.0.0.1:4444    # 这份固件把它们放在哪
+    python3 tools/screenshot.py --frame-addr 0x... --status-addr 0x... \
+        --port 1234 --out screen.png
     python3 tools/key.py MENU       # 注入一次按键
     tools/gpiob_dump.sh             # GPIOB 寄存器
 
@@ -274,8 +275,7 @@ uvk5_elf.sh            探针脚本从哪里找固件（环境变量，然后本
 不用反复敲 `key.py` 加 `screenshot.py`。
 
     tools/run.sh                                   # 先起模拟器
-    python3 tools/webui.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C                   # 再起服务
+    python3 tools/webui.py                         # 不需要地址：它画的是面板显存
 
 打开 <http://127.0.0.1:8080/>。键盘按电台的实际布局排列，侧键在旁边。方向键、
 回车（MENU）、Esc（EXIT）和数字键都绑定到了对应的物理按键。

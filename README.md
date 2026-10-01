@@ -186,9 +186,9 @@ Five minutes from a checkout to a running radio on a web page.
 
 `--frame-addr` and `--status-addr` are optional, and normally omitted. The page draws the
 **display controller's own memory**, which is the screen for every firmware and needs no
-addresses at all; those two only serve the guest-RAM fallback, and `tools/uvk5_buffers.py`
-finds them in whatever firmware is running (`--frame-addr` on the command line skips the
-search). Nothing in this repository holds a build's addresses.
+addresses at all; those two only serve the guest-RAM fallback, and the addresses are read
+out of whatever firmware is running by `tools/uvk5_buffers.py`. Giving one on the command
+line skips that search. Nothing in this repository holds a build's addresses.
 
 Drop any `.bin` on the page to boot it. The page's **Firmware slots** table reads and
 writes the multi-system firmware's four slots in the flash image, and **Multiboot**
@@ -284,8 +284,9 @@ stays ignored: it is a build artifact that gets written to.
     tools/run.sh                    # starts the machine
 
     tools/where.sh                  # where the firmware is executing
-    python3 tools/screenshot.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C --port 1234 --out screen.png
+    python3 tools/uvk5_buffers.py --qmp 127.0.0.1:4444    # where this firmware keeps them
+    python3 tools/screenshot.py --frame-addr 0x... --status-addr 0x... \
+        --port 1234 --out screen.png
     python3 tools/key.py MENU       # inject a keypress
     tools/gpiob_dump.sh             # GPIOB registers
 
@@ -304,8 +305,7 @@ between builds. Find them with:
 driven from a browser instead of `key.py` plus `screenshot.py`.
 
     tools/run.sh                                   # emulator first
-    python3 tools/webui.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C                   # then the server
+    python3 tools/webui.py                         # no addresses: it draws the panel
 
 Open <http://127.0.0.1:8080/>. The keypad is laid out like the radio, with the
 side keys alongside. Arrow keys, Enter (MENU), Esc (EXIT) and the digits are

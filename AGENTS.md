@@ -113,12 +113,14 @@ what it reads.
     tools/where.sh                # where execution is
     tools/gpiob_dump.sh           # GPIOB registers
     python3 tools/key.py MENU     # inject a keypress
-    python3 tools/screenshot.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C --port 1234 --out screen.png
+    python3 tools/uvk5_buffers.py --qmp 127.0.0.1:4444   # this firmware's addresses
+    python3 tools/screenshot.py --frame-addr 0x... --status-addr 0x... \
+        --port 1234 --out screen.png
 
-Screenshot addresses move between firmware builds. Get the current ones with:
-
-    arm-none-eabi-nm firmware.elf | grep -E 'gFrameBuffer|gStatusLine'
+Screenshot addresses move between firmware builds, and `screenshot.py` reads guest RAM, so
+it needs them. `tools/uvk5_buffers.py` finds them in the running firmware by matching the
+display controller's memory against SRAM -- the images built here are program-header-only
+ELFs with no symbol table, so `nm` has nothing to read for them (a fully linked ELF does).
 
 Rebuild after editing the machine:
 
@@ -133,8 +135,7 @@ session:
 There is also a browser UI, which is usually the quickest way to poke at the
 firmware by hand:
 
-    python3 tools/webui.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C     # then open http://127.0.0.1:8080/
+    python3 tools/webui.py            # no addresses: the page draws the panel's memory
 
 Two things about it that matter when working on this repo:
 
@@ -785,8 +786,9 @@ checks can be pointed at whatever tree you have.
 The flag check earned its own lesson. Its first version matched only to the end of the
 line, so on a wrapped command like
 
-    python3 tools/screenshot.py --frame-addr 0x200013DC \
-        --status-addr 0x2000175C --port 1234 --out screen.png
+    python3 tools/uvk5_buffers.py --qmp 127.0.0.1:4444   # this firmware's addresses
+    python3 tools/screenshot.py --frame-addr 0x... --status-addr 0x... \
+        --port 1234 --out screen.png
 
 it saw `--frame-addr` and nothing else -- 4 of 9 flags, and it reported a clean run.
 **A check that silently covers a quarter of what it claims is worse than no check**,
