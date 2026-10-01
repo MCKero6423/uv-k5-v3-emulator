@@ -36,7 +36,18 @@ def main(argv=None):
 
     from uvk5_qmp import QmpClient
     # The frame addresses are unused on this path: the controller has its own memory.
-    grab = uvk5_lcd.FrameGrabber(QmpClient(args.qmp, timeout=20), 0, 0)
+    try:
+        client = QmpClient(args.qmp, timeout=20)
+    except Exception as exc:
+        # QMP takes one client, and the web UI holds it for its whole lifetime -- so this
+        # is the normal outcome while the page is open, not a broken emulator.
+        print('cannot reach QMP at %s: %s' % (args.qmp, str(exc).splitlines()[0]), file=sys.stderr)
+        print('if the web UI is running it is holding the one QMP client; stop it, or use',
+              file=sys.stderr)
+        print('--qmp with the endpoint of an emulator started by tools/run.sh instead.',
+              file=sys.stderr)
+        return 2
+    grab = uvk5_lcd.FrameGrabber(client, 0, 0)
     pixels = grab.panel_pixels()
     if args.mapping in ("mirror-cols", "both"):
         pixels = [list(reversed(row)) for row in pixels]
