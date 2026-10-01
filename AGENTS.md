@@ -571,6 +571,24 @@ region is found the same way the screen buffers were: from the firmware's own co
 not from a guess -- the first version of the header here was 60 bytes because a field
 (`vma`) was missing, and the real `Beam.app` bytes said so immediately.
 
+The page writes them through three endpoints (`GET /api/apps`, `POST /api/apps/<n>`,
+`POST /api/apps/<n>/erase`), all of which edit the flash image the emulator boots from --
+so this is page-operable with no WebSerial, no browser permission and no serial protocol.
+
+Two things measured while wiring it up, both of which changed the code:
+
+* **The region can already hold something.** On a real image every one of the 16 slots read
+  back as data that is neither empty nor an app -- the factory resource block of a localised
+  build overlaps `0x102000`. Installing there would have destroyed it in silence, so
+  `install` now refuses a slot that holds anything other than an app unless it is asked to
+  overwrite (`--force` on the tool, `?force=1` on the endpoint). The refusal names what is
+  there and where the slot is.
+* **The edit does not land in the file you passed.** `_edit_flash` copies the image and
+  repoints the slot at the copy, deliberately, so a running emulator cannot have the file
+  under it rewritten. A first test asserted the original file had changed, saw zero
+  differing bytes and read as "the install did nothing" -- the bytes were in the copy. Check
+  `FlashSlot.path`, not the path you handed in.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and

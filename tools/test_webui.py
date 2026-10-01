@@ -1052,3 +1052,81 @@ class TestPageScriptParses(unittest.TestCase):
                              "the page's script does not parse:\n" + done.stderr)
         finally:
             os.unlink(path)
+
+
+class TestAppEndpoints(unittest.TestCase):
+    """The Labs edition's overlay apps, written into the external flash image.
+
+    No emulator: create_app is handed the flash path directly and the endpoints edit
+    that file. The region and the header are the firmware's own, from its
+    App/apps/app_overlay.h: 16 slots of 8 KiB from 0x102000, a 64-byte FAP1 header at
+    the slot base and the code one 4 KiB sector later.
+    """
+
+    def setUp(self):
+        import uvk5_apps
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.flash = os.path.join(self.dir, "flash.img")
+        with open(self.flash, "wb") as fh:
+            fh.write(b"\xff" * 0x200000)
+        self.flashslot = FlashSlot(self.flash)
+        self.app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000,
+                                    flash=self.flashslot)
+        self.client = self.app.test_client()
+        self.blob = uvk5_apps.build(b"\x01" * 64, "Beam", "1.0", shortcut="beam")
+
+    def test_the_listing_names_the_region_and_every_slot(self):
+        body = self.client.get("/api/apps").get_json()
+        self.assertEqual(body["region"], 0x102000)
+        self.assertEqual(body["slot_count"], 16)
+        self.assertEqual(len(body["slots"]), 16)
+        self.assertEqual(body["slots"][0]["state"], "empty")
+
+    def test_installing_an_app_puts_it_where_the_firmware_looks(self):
+        r = self.client.post("/api/apps/3", data=self.blob)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["app"]["name"], "Beam")
+        row = r.get_json()["apps"]["slots"][3]
+        self.assertEqual(row["state"], "app")
+        self.assertEqual(row["base"], 0x102000 + 3 * 0x2000)
+        self.assertEqual(row["code_size"], 64)
+
+    def test_the_bytes_reach_the_image_the_emulator_will_boot(self):
+        # _edit_flash copies the image and repoints the slot at the copy, so the
+        # file it did not touch is expected to be untouched: check the one it uses.
+        self.client.post("/api/apps/0", data=self.blob)
+        with open(self.flashslot.path, "rb") as fh:
+            image = fh.read()
+        self.assertEqual(image[0x102000:0x102004], b"FAP1")
+        self.assertEqual(image[0x103000:0x103004], b"\x01" * 4)
+
+    def test_a_blob_that_is_not_an_app_is_refused_with_the_reason(self):
+        r = self.client.post("/api/apps/0", data=b"this is not an app at all")
+        self.assertEqual(r.status_code, 400)
+        reason = r.get_json()["error"]
+        self.assertTrue("FAP1" in reason or "too short" in reason, reason)
+
+    def test_installing_over_other_data_is_refused_unless_forced(self):
+        """Measured on a real image: the factory resource block can overlap the region."""
+        image = bytearray(b"\xff" * 0x200000)
+        image[0x106000:0x106008] = b"RESDATA1"
+        with open(self.flash, "wb") as fh:
+            fh.write(image)
+        r = self.client.post("/api/apps/2", data=self.blob)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("already holds", r.get_json()["error"])
+        r = self.client.post("/api/apps/2?force=1", data=self.blob)
+        self.assertEqual(r.status_code, 200)
+
+    def test_erase_clears_the_slot(self):
+        self.assertEqual(self.client.post("/api/apps/2", data=self.blob).status_code, 200)
+        r = self.client.post("/api/apps/2/erase")
+        body = r.get_json()
+        self.assertEqual(r.status_code, 200, body)
+        self.assertEqual(body["apps"]["slots"][2]["state"], "empty")
+
+    def test_a_slot_outside_the_region_is_refused(self):
+        r = self.client.post("/api/apps/16", data=self.blob)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("out of range", r.get_json()["error"])

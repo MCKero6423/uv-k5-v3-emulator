@@ -334,6 +334,9 @@ Endpoints, if you want to script it:
 | `GET /api/slots` | the firmware slots in the flash image the emulator uses |
 | `POST /api/slots/<n>` | body is a `.bin`; writes it into slot `n` and restarts |
 | `POST /api/slots/<n>/erase` | erase slot `n` |
+| `GET /api/apps` | the Labs edition's overlay-app slots in the same flash image |
+| `POST /api/apps/<n>` | body is a `.app`; installs it into app slot `n` (add `?force=1` to overwrite data that is not an app) |
+| `POST /api/apps/<n>/erase` | clear app slot `n` |
 | `POST /api/flash` | body is a flash image; use it from now on |
 
 Frames now come from the display controller's own memory: a QMP `qom-get` on the

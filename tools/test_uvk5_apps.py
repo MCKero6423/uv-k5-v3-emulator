@@ -115,9 +115,39 @@ class TestInstall(unittest.TestCase):
         A.erase(img, 2)
         self.assertIsNone(A.read_slot(bytes(img), 2))
 
+    def test_it_refuses_to_overwrite_something_that_is_not_an_app(self):
+        """Measured on a real image: the factory resource block can overlap the region."""
+        img = image()
+        base = A.REGION_BASE
+        img[base:base + 8] = b"RESDATA1"
+        with self.assertRaises(A.AppError) as caught:
+            A.install(img, 0, A.build(b"\\x01" * 64, "Beam"))
+        self.assertIn("already holds", str(caught.exception))
+        A.install(img, 0, A.build(b"\\x01" * 64, "Beam"), force=True)
+        self.assertEqual(A.read_slot(bytes(img), 0)["name"], "Beam")
+
+    def test_installing_over_an_app_needs_no_force(self):
+        img = image()
+        A.install(img, 0, A.build(b"\\x11" * 64, "Old"))
+        A.install(img, 0, A.build(b"\\x22" * 64, "New"))
+        self.assertEqual(A.read_slot(bytes(img), 0)["name"], "New")
+
     def test_a_slot_outside_the_region_is_refused(self):
         with self.assertRaises(A.AppError):
             A.install(image(), 16, A.build(b"x", "A"))
+
+
+class TestResolve(unittest.TestCase):
+    def test_a_bare_name_is_found_under_work_apps(self):
+        """The first attempt at this used 'Beam.app' from the repository root."""
+        path = A.resolve("Beam.app")
+        self.assertTrue(os.path.exists(path), path)
+
+    def test_a_missing_name_says_where_it_looked(self):
+        with self.assertRaises(A.AppError) as caught:
+            A.resolve("NoSuchGame.app")
+        self.assertIn("looked in", str(caught.exception))
+        self.assertIn("work", str(caught.exception))
 
 
 class TestRealFile(unittest.TestCase):

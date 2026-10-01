@@ -29,6 +29,7 @@ from uvk5_image import ImageError, detect as detect_image
 from uvk5_slots import (SLOT_COUNT, erase_slot_file, slots_json,
                         write_slot_file)
 from uvk5_keys import KEYS, is_valid, normalise
+import uvk5_apps
 from uvk5_lcd import PANEL_PATH
 from uvk5_logs import LogBuffer
 from uvk5_stream import FramePump
@@ -514,6 +515,66 @@ def create_app(client, frame_addr: int = None, status_addr: int = None, scale: i
             return jsonify(error=str(exc)), 400
         log.add("slots", "slot %d erased" % slot, ip=client_ip())
         return jsonify(slot=row)
+
+    # ------------------------------------------------------------- overlay apps
+    #
+    # The Labs edition's small apps (Tetris, Breakout, Beam, Plasma, ...) live in the
+    # *external* flash, in the region its own App/apps/app_overlay.h describes: 16 slots
+    # of 8 KiB from 0x102000, a 64-byte FAP1 header at the slot base and the code one
+    # 4 KiB sector later. Upstream installs them from UVStudio over WebSerial; this page
+    # owns the image, so the same bytes go to the same offsets with no serial protocol
+    # and no browser permission. The 64-byte header is shared with the multiboot firmware
+    # slots -- FMB1 is a firmware, FAP1 is an app -- which is why both live in this one
+    # image and why the power-on menu can list them together.
+    @app.get("/api/apps")
+    def api_apps():
+        """Every overlay-app slot in the flash image the emulator is using."""
+        if flash is None:
+            return jsonify(error="this server was started without flash control"), 409
+        try:
+            return jsonify(uvk5_apps.apps_json(flash.path))
+        except Exception as exc:
+            return jsonify(error=str(exc)), 500
+
+    @app.post("/api/apps/<int:slot>")
+    def api_app_install(slot):
+        """Install an uploaded .app into a slot, then power the radio on again."""
+        if not 0 <= slot < uvk5_apps.APP_SLOT_COUNT:
+            return jsonify(error="app slot %d is out of range (0..%d)"
+                           % (slot, uvk5_apps.APP_SLOT_COUNT - 1)), 400
+        data = request.get_data(cache=False, as_text=False)
+        if not data:
+            return jsonify(error="no .app in the request body"), 400
+        if len(data) > MAX_UPLOAD_BYTES:
+            return jsonify(error="%d bytes is too large" % len(data)), 413
+        try:
+            force = request.args.get("force", "").lower() in ("1", "true", "yes")
+            info = _edit_flash(lambda p: uvk5_apps.install_file(p, slot, data, force))
+        except Exception as exc:
+            # The tool refuses what the firmware would show as APP ERROR, so the reason
+            # reaches the page instead of becoming a silent no-op on the radio.
+            log.add("apps", "slot %d refused: %s" % (slot, exc), ip=client_ip())
+            return jsonify(error=str(exc)), 400
+        log.add("apps", "slot %d <- %s %s (%d bytes of code)"
+                % (slot, info["name"], info["version"], info["code_size"]), ip=client_ip())
+        return jsonify(app=dict(slot=slot, name=info["name"], version=info["version"],
+                                code_size=info["code_size"], crc32=info["crc32"],
+                                shortcut=info["shortcut"]),
+                       apps=uvk5_apps.apps_json(flash.path))
+
+    @app.post("/api/apps/<int:slot>/erase")
+    def api_app_erase(slot):
+        """Clear one app slot."""
+        if not 0 <= slot < uvk5_apps.APP_SLOT_COUNT:
+            return jsonify(error="app slot %d is out of range (0..%d)"
+                           % (slot, uvk5_apps.APP_SLOT_COUNT - 1)), 400
+        try:
+            _edit_flash(lambda p: uvk5_apps.erase_file(p, slot))
+        except Exception as exc:
+            log.add("apps", "slot %d erase failed: %s" % (slot, exc), ip=client_ip())
+            return jsonify(error=str(exc)), 400
+        log.add("apps", "slot %d erased" % slot, ip=client_ip())
+        return jsonify(apps=uvk5_apps.apps_json(flash.path))
 
     @app.post("/api/flash")
     def api_flash_upload():

@@ -30,6 +30,7 @@ in slot N" in this page's slot table touch the same external flash.
     tools/uvk5_apps.py erase   work/user-flash.img 1
 """
 import argparse
+import os
 import struct
 import sys
 import zlib
@@ -45,6 +46,12 @@ REGION_BASE = 0x00102000
 SLOT_STRIDE = 0x0002000
 CODE_OFFSET = 0x00001000
 SLOT_COUNT = 16
+# The firmware's own names for these, so a reader can hold both side by side.
+APP_REGION_BASE = REGION_BASE
+APP_SLOT_STRIDE = SLOT_STRIDE
+APP_CODE_OFFSET = CODE_OFFSET
+APP_SLOT_COUNT = SLOT_COUNT
+APP_OVERLAY_MAX_BYTES = APP_OVERLAY_MAX
 
 FLAG_COMMITTED = 0x0001
 FLAG_SCREEN_SAVER = 0x0002
@@ -166,16 +173,28 @@ def list_apps(image: bytes):
     return [info for info in (read_slot(image, i) for i in range(SLOT_COUNT)) if info]
 
 
-def install(image: bytearray, slot: int, blob: bytes) -> dict:
+def install(image: bytearray, slot: int, blob: bytes, force: bool = False) -> dict:
     """Write @blob into @slot: header at the base, code at +0x1000, rest erased.
 
     The header sector is erased first, the way the flash would be: an install must not
     leave a byte of the previous app behind for the loader to trip over.
+
+    Refuses to overwrite a slot that holds something which is neither empty nor an app.
+    Measured on a real image: 0x102000..0x122000 can already carry data (the factory
+    resource block of a localised build overlaps it), and an install there silently
+    destroys it. `force` is for when that is what you meant.
     """
     info = parse(blob)
     base = slot_base(slot)
     if base + SLOT_STRIDE > len(image):
         raise AppError("the image is too small for slot %d" % slot)
+    if not force:
+        occupied = read_slot(bytes(image), slot)
+        if occupied is not None and occupied.get("kind") not in ("app",):
+            raise AppError(
+                "slot %d at 0x%06X already holds %s (%r), not an app; erase it first "
+                "or pass force to overwrite" % (slot, base, occupied.get("kind", "data"),
+                                                (occupied.get("name") or "")[:16]))
     for i in range(base, base + SLOT_STRIDE):
         image[i] = 0xFF
     image[base:base + HDR_SIZE] = blob[:HDR_SIZE]
@@ -193,6 +212,73 @@ def erase(image: bytearray, slot: int) -> int:
     return base
 
 
+def resolve(name: str) -> str:
+    """A path to the .app named @name, looking in the places it usually is.
+
+    The first person to try this typed `tools/uvk5_apps.py install image 1 Beam.app` from the
+    repository root, where no such file exists: the tool said FileNotFoundError and nothing
+    else. The apps live in work/apps/ once downloaded, and the bare name is what everybody
+    types, so both are accepted and the refusal lists where it looked.
+    """
+    if os.path.isabs(name) or os.path.exists(name):
+        return name
+    roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "work", "apps"),
+             os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "apps"),
+             "."]
+    tried = []
+    for root in roots:
+        candidate = os.path.join(root, name)
+        tried.append(candidate)
+        if os.path.exists(candidate):
+            return candidate
+    raise AppError("no %s; looked in %s" % (name, ", ".join(os.path.normpath(t) for t in tried)))
+
+
+def apps_json(path: str) -> dict:
+    """Every app slot as a row, for the page: one entry per slot, occupied or not.
+
+    The page shows all of them rather than only the occupied ones, because choosing the
+    slot is part of installing, and the radio itself prints Empty for a free one.
+    """
+    with open(path, "rb") as fh:
+        image = fh.read()
+    occupied = {info["slot"]: info for info in list_apps(image)}
+    rows = []
+    for slot in range(SLOT_COUNT):
+        row = dict(slot=slot, base=slot_base(slot))
+        info = occupied.get(slot)
+        if info is None:
+            row["state"] = "empty"
+        elif info.get("kind") == "app":
+            row.update(state="app", name=info["name"], version=info["version"],
+                       code_size=info["code_size"], shortcut=info["shortcut"],
+                       committed=info["committed"], crc32=info["crc32"])
+        else:
+            row.update(state=info.get("kind", "unknown"), name=info.get("magic", "?"))
+        rows.append(row)
+    return dict(region=REGION_BASE, slot_count=SLOT_COUNT, stride=SLOT_STRIDE,
+                code_offset=CODE_OFFSET, overlay_max=APP_OVERLAY_MAX, slots=rows)
+
+
+def install_file(path: str, slot: int, blob: bytes, force: bool = False) -> dict:
+    """Install @blob into @slot of the flash image at @path, in place."""
+    image = _read(path)
+    info = install(image, slot, blob, force=force)
+    with open(path, "wb") as fh:
+        fh.write(image)
+    return info
+
+
+def erase_file(path: str, slot: int) -> int:
+    """Clear @slot of the flash image at @path."""
+    image = _read(path)
+    base = erase(image, slot)
+    with open(path, "wb") as fh:
+        fh.write(image)
+    return base
+
+
+
 def _read(path: str) -> bytearray:
     with open(path, "rb") as fh:
         return bytearray(fh.read())
@@ -208,6 +294,8 @@ def main(argv=None) -> int:
     p.add_argument("image")
     p.add_argument("slot", type=int)
     p.add_argument("app")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite a slot holding something other than an app")
     p = sub.add_parser("erase", help="clear a slot")
     p.add_argument("image")
     p.add_argument("slot", type=int)
@@ -217,7 +305,7 @@ def main(argv=None) -> int:
 
     try:
         if args.cmd == "info":
-            with open(args.app, "rb") as fh:
+            with open(resolve(args.app), "rb") as fh:
                 info = parse(fh.read())
             print("%s %s  %d bytes of code (blob %d)  ABI %d  api>=%d  shortcut %s  CRC 0x%08X"
                   % (info["name"], info["version"], info["code_size"], info["total"], info["abi"],
@@ -236,10 +324,10 @@ def main(argv=None) -> int:
                 else:
                     print("slot %2d @0x%06X  %s" % (info["slot"], info["base"], info["kind"]))
             return 0
-        with open(args.app, "rb") as fh:
+        with open(resolve(args.app), "rb") as fh:
             blob = fh.read()
         if args.cmd == "install":
-            info = install(image, args.slot, blob)
+            info = install(image, args.slot, blob, force=args.force)
             with open(args.image, "wb") as fh:
                 fh.write(image)
             print("installed %s %s into slot %d at 0x%06X (%d bytes)"
