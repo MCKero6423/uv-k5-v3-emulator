@@ -641,6 +641,22 @@ the multiboot menu reads firmware slots rather than apps. **The answer was writt
 the flasher's own translation file**, not in the firmware source I had been reading -- so
 when a feature's entry point is missing, the host tool that installs it is the document.
 
+**"Init ... DO NOT POWER OFF" that never ends is a pending multiboot state marker.** Measured
+on a real image: `0x100000` held `FMP3` next to a committed slot 0, so the factory bootloader
+reflashed the internal flash from that slot on every power-on and reset again -- a restore loop.
+The firmware's own banner reappeared once a cycle in the serial log (7 -> 8 in 25 s) while the
+screen never changed. Clearing the two marker sectors (`0x100000..0x101FFF`, which stops just
+before the app region at `0x102000`, so installed apps are untouched) ended it: the banner count
+stopped rising and the radio booted once and stayed.
+
+That loop explained a second surprise: edits made through the page vanished. The emulator writes
+its in-memory image back when it exits, and the looping guest's copy was older than the file, so
+powering it off overwrote what had just been installed. With the loop gone the same installs
+survive a power cycle -- verified by installing, powering off, seeing them still listed, powering
+on, seeing them still listed, and having the radio answer `0x0730` with all three. **A stale
+write-back is worth suspecting whenever an edit "does not stick"**, and a guest that is quietly
+rebooting is exactly how one happens.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
