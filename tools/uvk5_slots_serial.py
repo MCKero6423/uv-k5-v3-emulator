@@ -38,6 +38,8 @@ import uvk5_slots as slots                 # the header layout, in one place
 
 MSG_SLOT_INFO = 0x0720
 MSG_SLOT_INFO_ACK = 0x0721
+MSG_APP_INFO = 0x0730
+MSG_APP_INFO_ACK = 0x0731
 MSG_SLOT_ERASE = 0x0722
 MSG_SLOT_ERASE_ACK = 0x0723
 MSG_SLOT_WRITE = 0x0724
@@ -190,6 +192,15 @@ class Radio:
                 except SlotError:
                     pass
         return None
+
+    def app_info(self, slot: int):
+        """The firmware's own app header for @slot (0x0730 -> 0x0731), or None.
+
+        The Labs edition answers this; a build without overlay apps does not answer at
+        all, which is how UVStudio decides whether the Apps tab applies, and it is the
+        honest way to ask "does the radio see this app" after writing one.
+        """
+        return self._command(MSG_APP_INFO, bytes([slot]), MSG_APP_INFO_ACK, wait=4.0)
 
     def info(self, slot: int):
         """(status, header bytes) for @slot, without a CRC pass."""

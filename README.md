@@ -337,6 +337,7 @@ Endpoints, if you want to script it:
 | `GET /api/apps` | the Labs edition's overlay-app slots in the same flash image |
 | `POST /api/apps/<n>` | body is a `.app`; installs it into app slot `n` (add `?force=1` to overwrite data that is not an app) |
 | `POST /api/apps/<n>/erase` | clear app slot `n` |
+| `GET /api/apps/radio` | ask the running firmware what it sees in each app slot (`0x0730`) |
 | `POST /api/flash` | body is a flash image; use it from now on |
 
 Frames now come from the display controller's own memory: a QMP `qom-get` on the

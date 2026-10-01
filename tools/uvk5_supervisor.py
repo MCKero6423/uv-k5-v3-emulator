@@ -85,7 +85,7 @@ def resolve_image(image):
 
 def default_launcher(qemu: str, flash: str, elf, boot_key=None,
                      qmp_path: str = DEFAULT_QMP, gdb_port: int = 1234,
-                     capture_stderr: bool = True):
+                     capture_stderr: bool = True, serial_port: int = None):
     """Reproduces the command line in tools/run.sh.
 
     `elf` may be a path, an ImageInfo, or an ImageSlot -- the last is what the web UI
@@ -124,7 +124,9 @@ def default_launcher(qemu: str, flash: str, elf, boot_key=None,
             [qemu, "-M", machine,
              "-nographic", "-monitor", "none",
              "-qmp", qmp_argument(qmp_path),
-             "-kernel", path, "-gdb", "tcp::%d" % gdb_port],
+             "-kernel", path, "-gdb", "tcp::%d" % gdb_port]
+            + (["-serial", "tcp:127.0.0.1:%d,server=on,wait=off" % serial_port]
+               if serial_port else []),
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL)

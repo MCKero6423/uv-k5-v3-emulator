@@ -302,6 +302,7 @@ uvk5_elf.sh            探针脚本从哪里找固件（环境变量，然后本
 | `GET /api/apps` | 同一 flash 镜像里 Labs 版的叠加应用槽 |
 | `POST /api/apps/<n>` | 请求体是一个 `.app`；装进应用槽 `n`（加 `?force=1` 可覆盖非应用数据） |
 | `POST /api/apps/<n>/erase` | 清空应用槽 `n` |
+| `GET /api/apps/radio` | 问正在运行的固件它在每个应用槽里看到了什么（`0x0730`） |
 | `POST /api/flash` | 请求体是一份 flash 镜像；之后就用它 |
 
 画面现在取自显示控制器自己的内存：对面板的 `gram` 属性做一次 QMP `qom-get`。

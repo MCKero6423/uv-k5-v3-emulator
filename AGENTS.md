@@ -609,6 +609,22 @@ That is the header this page installed, echoed by the running firmware, so the r
 offset, the layout and the bytes are right. Slots 1 and 2 answered `status 2` with unrelated
 data, which is the overlap the install guard exists for.
 
+The page can also **ask the radio**. `GET /api/apps/radio` opens the firmware's serial
+port and sends `0x0730` for all sixteen slots, so the answer comes from the running firmware
+rather than from our reading of the file -- the bytes can be right and the firmware still
+refuse a slot. Measured after installing `Beam.app` into slot 0, through the page:
+
+    slot 0     -> Beam 1.0 · 1100 B · crc 0xd976058 · shortcut beam · committed true
+    slots 1..3 -> status 2 with unrelated data   (the resource-block overlap the guard refuses)
+
+A button beside the table asks it and shows the answer in its own column.
+
+One thing that cost a round here: the server gives the emulator it starts a serial port
+(`--serial-port`, default 4445), and QEMU needs the mingw64 DLLs on `PATH`. Started from
+`work/run-webui.ps1` they are added; started by hand they are not, and a missing DLL makes
+QEMU exit **before** it opens QMP -- which surfaces only as "QMP socket never appeared", with
+nothing else naming the cause. QEMU's option errors go to stdout, which the launcher discards.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and

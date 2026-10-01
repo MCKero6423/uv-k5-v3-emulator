@@ -166,3 +166,31 @@ class TestRealFile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRadioReply(unittest.TestCase):
+    """The firmware's own answer about a slot, decoded without a radio."""
+
+    def test_a_reply_carrying_an_app_header_decodes(self):
+        blob = A.build(b"\x01" * 32, "Beam", "1.0", shortcut="beam")
+        reply = bytes([2, 0]) + blob[:A.HDR_SIZE]
+        info = A.parse_radio_reply(reply)
+        self.assertEqual(info["slot"], 2)
+        self.assertEqual(info["status"], 0)
+        self.assertEqual(info["name"], "Beam")
+        self.assertEqual(info["version"], "1.0")
+        self.assertEqual(info["code_size"], 32)
+        self.assertEqual(info["shortcut"], "beam")
+        self.assertTrue(info["committed"])
+
+    def test_a_reply_from_a_slot_holding_something_else_is_not_an_app(self):
+        """Measured on a real image: slots 1..3 answer status 2 with unrelated data."""
+        info = A.parse_radio_reply(bytes([1, 2]) + b"\xd4\x56\xd1\xf4" + b"\x00" * 60)
+        self.assertEqual(info["status"], 2)
+        self.assertNotEqual(info.get("magic"), "FAP1")
+        self.assertNotIn("name", info)
+
+    def test_a_short_reply_says_so_instead_of_inventing_a_header(self):
+        info = A.parse_radio_reply(bytes([0]))
+        self.assertIsNone(info["status"])
+        self.assertIn("short", info["note"])

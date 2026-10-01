@@ -146,7 +146,8 @@ def image_has_multiboot(path):
 
 
 def create_app(client, frame_addr: int = None, status_addr: int = None, scale: int = 4,
-               supervisor=None, log=None, image=None, boot_key=None, flash=None):
+               supervisor=None, log=None, image=None, boot_key=None, flash=None,
+               serial_port=None):
     app = Flask(__name__)
 
     if log is None:
@@ -377,6 +378,40 @@ def create_app(client, frame_addr: int = None, status_addr: int = None, scale: i
         if info is not None and image is not None:
             info = dict(info, multiboot=image_has_multiboot(image.path))
         return jsonify(loaded=info is not None, firmware=info, running=running_firmware())
+
+    @app.get("/api/apps/radio")
+    def api_apps_radio():
+        """Ask the running firmware what it sees in each app slot.
+
+        The firmware answers 0x0730 with the header it reads from its own region (see
+        App/apps/app_overlay.h), so this is the radio's answer rather than our reading of
+        the file -- and that is the check that matters after an install, because the bytes
+        can be right and the firmware still refuse the slot. It needs the emulator to have
+        a serial port, which this server gives it when it starts one itself.
+        """
+        if serial_port is None:
+            return jsonify(error="this server started the emulator without a serial port, "
+                                 "so the radio cannot be asked"), 409
+        try:
+            import uvk5_slots_serial
+            radio = uvk5_slots_serial.Radio("127.0.0.1:%d" % serial_port, timeout=8.0,
+                                            log=lambda *a: None)
+        except Exception as exc:
+            return jsonify(error="cannot reach the radio's serial port: %s" % exc), 503
+        slots = []
+        try:
+            radio.session()
+            for slot in range(uvk5_apps.SLOT_COUNT):
+                slots.append(uvk5_apps.parse_radio_reply(radio.app_info(slot)) | {"slot": slot})
+        except Exception as exc:
+            return jsonify(error="the radio stopped answering: %s" % exc, slots=slots), 503
+        finally:
+            try:
+                radio.close()
+            except Exception:
+                pass
+        log.add("apps", "asked the radio about %d app slots" % len(slots), ip=client_ip())
+        return jsonify(slots=slots)
 
     @app.post("/api/firmware")
     def api_firmware_upload():
@@ -941,6 +976,7 @@ def render_index(scale: int) -> str:
   <div class="fwbar">
     <label>Overlay apps</label>
     <span id="appstate">-</span>
+    <button id="appask" title="ask the running firmware what it sees in each app slot">Ask the radio</button>
     <span class="hint">the Labs edition's apps live in the same external flash (16 slots
     from 0x102000; the firmware's menu lists the first eight, numbered 1..8). Pick a .app for a slot to
     install it — no serial port and no browser permission are involved</span>
@@ -1300,10 +1336,14 @@ async function loadApps() {{
         : s.state === 'empty' ? '<i>Empty</i>'
         : '<i>' + s.state + '</i> — not an app';
       const size = s.state === 'app' ? s.code_size + ' B' : '';
+      const said = radioApps && radioApps[s.slot]
+        ? (radioApps[s.slot].status === 0 ? 'radio: ' + radioApps[s.slot].name
+           : 'radio: status ' + radioApps[s.slot].status)
+        : '';
       // Upstream and the firmware's own menu number the eight usable slots 1..8, while the
       // region has sixteen: slot 0 is "1" there, so show them the same way.
       tr.innerHTML = '<td>app ' + (s.slot + 1) + (s.slot < 8 ? '' : ' (after the menu)') +
-        '</td><td>' + what + '</td><td>' + size + '</td><td></td>';
+        '</td><td>' + what + '</td><td>' + size + '</td><td>' + said + '</td><td></td>';
       const td = tr.lastElementChild;
       const inp = document.createElement('input');
       inp.type = 'file';
@@ -1348,6 +1388,25 @@ async function loadApps() {{
 }}
 loadApps();
 setInterval(loadApps, 15000);
+// "Ask the radio": the firmware answers 0x0730 with the header it reads from its own
+// region, which is the check that matters after an install -- the bytes can be right and
+// the firmware still refuse the slot. It needs a serial port, which this server gives its
+// own emulator when it starts one.
+let radioApps = null;
+const appAsk = document.getElementById('appask');
+if (appAsk) appAsk.addEventListener('click', async () => {{
+  appAsk.disabled = true;
+  appAsk.textContent = 'asking...';
+  try {{
+    const j = await (await fetch('/api/apps/radio')).json();
+    radioApps = j.error ? {{ error: j.error }} : j.slots;
+  }} catch (err) {{
+    radioApps = {{ error: String(err) }};
+  }}
+  appAsk.disabled = false;
+  appAsk.textContent = 'Ask the radio';
+  loadApps();
+}});
 // Firmware upload. The file *is* the request body, so the server reads the
 // vector table itself and decides the load offset: an application image and a
 // full-flash image need different ones, and the wrong one fails silently.
@@ -1461,6 +1520,9 @@ def main() -> int:
     ap.add_argument("--flash", default=os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "assets", "flash.img"))
+    ap.add_argument("--serial-port", type=int, default=4445,
+                    help="TCP port for the firmware's serial, so the page can ask the "
+                         "radio what it sees; needs to differ from --qmp")
     ap.add_argument("--gdb-port", type=int, default=1234)
     args = ap.parse_args()
 
@@ -1494,7 +1556,8 @@ def main() -> int:
 
     supervisor = Supervisor(
         launch=default_launcher(args.qemu, flash, image, boot_key,
-                                qmp_path=args.qmp, gdb_port=args.gdb_port),
+                                qmp_path=args.qmp, gdb_port=args.gdb_port,
+                                serial_port=args.serial_port),
         connect=connect, log=log)
 
     if args.attach:
@@ -1506,7 +1569,7 @@ def main() -> int:
 
     app = create_app(supervisor.client(), args.frame_addr, args.status_addr,
                      args.scale, supervisor=supervisor, log=log, image=image,
-                     boot_key=boot_key, flash=flash)
+                     boot_key=boot_key, flash=flash, serial_port=args.serial_port)
     print(f"serving on http://{args.host}:{args.port}/")
     print("attached to a running emulator" if args.attach
           else "emulator is OFF; press On in the browser to boot it")

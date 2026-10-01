@@ -279,6 +279,33 @@ def erase_file(path: str, slot: int) -> int:
 
 
 
+def parse_radio_reply(raw: bytes) -> dict:
+    """The firmware's 0x0731 answer: [slot, status, app_header_t].
+
+    A pure function so the decoding can be tested without a radio. The header comes back
+    as the same 64-byte structure this module writes, which is the point: the firmware
+    reading its own region and answering is what proves an install, not the file we wrote.
+    """
+    raw = bytes(raw)
+    if len(raw) < 2:
+        return dict(status=None, note="short reply")
+    out = dict(slot=raw[0], status=raw[1])
+    if len(raw) >= 2 + HDR_SIZE:
+        header = raw[2:2 + HDR_SIZE]
+        if header[:4] == b"FAP1":
+            try:
+                info = parse(header, strict=False)   # no code here, so no CRC to check
+            except AppError as exc:
+                out["note"] = str(exc)
+                return out
+            out.update(name=info["name"], version=info["version"], code_size=info["code_size"],
+                       crc32=info["crc32"], shortcut=info["shortcut"],
+                       committed=info["committed"], magic="FAP1")
+            return out
+        out["magic"] = header[:4].decode("latin1", "replace")
+    return out
+
+
 def _read(path: str) -> bytearray:
     with open(path, "rb") as fh:
         return bytearray(fh.read())
