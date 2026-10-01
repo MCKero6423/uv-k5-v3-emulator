@@ -625,6 +625,22 @@ One thing that cost a round here: the server gives the emulator it starts a seri
 QEMU exit **before** it opens QMP -- which surfaces only as "QMP socket never appeared", with
 nothing else naming the cause. QEMU's option errors go to stdout, which the launcher discards.
 
+**Launching one is `F` then `7`, then MENU to run it.** That is upstream's own wording --
+UVStudio's `locales/en.js` says "launch them from the F + 7 menu" -- and it is what
+`App/apps/app_menu.c` does: `KEY_MENU` on an installed row calls `APP_LaunchOverlay(sel)`,
+which "runs until the app exits"; EXIT leaves the menu. Verified in the emulator, with
+`Tetris.app` installed through the page's own endpoint:
+
+    F, 7   -> the app region goes from 0 reads to 8, and a boxed "F4HWN APPS" screen appears
+    MENU   -> one read inside slot 0's code, and the game's own screen replaces the radio's
+    DOWN   -> the piece moves; the screen is still the game two seconds later
+
+For a while before that I could not find the way in at all: twenty keys short and long, the
+whole 79-entry settings menu, and the multiboot menu all left the app region untouched, and
+the multiboot menu reads firmware slots rather than apps. **The answer was written down in
+the flasher's own translation file**, not in the firmware source I had been reading -- so
+when a feature's entry point is missing, the host tool that installs it is the document.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
