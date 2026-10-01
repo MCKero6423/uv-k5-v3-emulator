@@ -140,6 +140,13 @@ class TestInstall(unittest.TestCase):
 class TestResolve(unittest.TestCase):
     def test_a_bare_name_is_found_under_work_apps(self):
         """The first attempt at this used 'Beam.app' from the repository root."""
+        work_apps = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "work", "apps")
+        os.makedirs(work_apps, exist_ok=True)
+        beam = os.path.join(work_apps, "Beam.app")
+        if not os.path.exists(beam):
+            with open(beam, "wb") as fh:
+                fh.write(b"fixture")
+            self.addCleanup(lambda: os.path.exists(beam) and os.unlink(beam))
         path = A.resolve("Beam.app")
         self.assertTrue(os.path.exists(path), path)
 
