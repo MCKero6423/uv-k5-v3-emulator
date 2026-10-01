@@ -184,9 +184,11 @@ Five minutes from a checkout to a running radio on a web page.
     python3 tools/webui.py --qemu ~/src/qemu-7.2/build/qemu-system-arm \
         --elf assets/firmware/f4hwn.fieldops.v6.0.0.bin     # then open http://127.0.0.1:8080/
 
-`--frame-addr` and `--status-addr` default to one known build and move between builds;
-see [Web remote control](#web-remote-control) for how to find them. On Windows,
-`work/run-webui.ps1` wraps step 4 with this machine's paths.
+`--frame-addr` and `--status-addr` are optional, and normally omitted. The page draws the
+**display controller's own memory**, which is the screen for every firmware and needs no
+addresses at all; those two only serve the guest-RAM fallback, and `tools/uvk5_buffers.py`
+finds them in whatever firmware is running (`--frame-addr` on the command line skips the
+search). Nothing in this repository holds a build's addresses.
 
 Drop any `.bin` on the page to boot it. The page's **Firmware slots** table reads and
 writes the multi-system firmware's four slots in the flash image, and **Multiboot**

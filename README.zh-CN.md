@@ -162,8 +162,10 @@ uvk5_elf.sh            探针脚本从哪里找固件（环境变量，然后本
     python3 tools/webui.py --qemu ~/src/qemu-7.2/build/qemu-system-arm \
         --elf assets/firmware/f4hwn.fieldops.v6.0.0.bin     # 然后打开 http://127.0.0.1:8080/
 
-`--frame-addr` 与 `--status-addr` 默认值对应一份已知构建，换构建会变——怎么找见
-[网页远控](#网页远控)。Windows 上 `work/run-webui.ps1` 把第 4 步按本机路径包好了。
+`--frame-addr` 与 `--status-addr` 都是可选的，通常不传。页面画的是**显示控制器自己的显存** ——
+对任何固件那就是屏幕，不需要任何地址；这两个参数只服务 guest RAM 回落路径，而
+`tools/uvk5_buffers.py` 会从**正在运行的那份固件**里把它们找出来（命令行给了 `--frame-addr`
+就跳过搜索）。仓库里不保存任何一份构建的地址。
 
 把任意 `.bin` 拖到页面上即可启动。页面上的 **Firmware slots** 表可以读写 flash 镜像里
 多系统固件的四个槽位，**Multiboot** 会按住 MENU 重启以进入多系统菜单——前提是那份构建

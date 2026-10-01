@@ -6,7 +6,7 @@ so the emulated radio can be driven from a browser.
 
 Start the emulator first (tools/run.sh), then:
 
-    python3 tools/webui.py --frame-addr 0x200013DC --status-addr 0x2000175C
+    python3 tools/webui.py            # no addresses: the page draws the panel's own memory
 
 Then open http://127.0.0.1:8080/
 
