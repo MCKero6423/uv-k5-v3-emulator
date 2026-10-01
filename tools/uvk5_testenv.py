@@ -36,7 +36,16 @@ def qemu():
         if value and os.path.exists(value):
             return pathlib.Path(value)
     found = shutil.which("qemu-system-arm")
-    return pathlib.Path(found) if found else None
+    if found:
+        return pathlib.Path(found)
+    # The sibling tree tools/setup_qemu.sh builds into, which is also what run_tests.sh
+    # assumes. Not a machine-specific path: it is this checkout's own convention, so a
+    # fresh clone that followed the README finds its QEMU without being told.
+    sibling = pathlib.Path(__file__).resolve().parent.parent.parent / "qemu-7.2" / "build"
+    for name in ("qemu-system-arm", "qemu-system-arm.exe"):
+        if (sibling / name).exists():
+            return sibling / name
+    return None
 
 
 def gdb():

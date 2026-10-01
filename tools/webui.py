@@ -144,7 +144,7 @@ def image_has_multiboot(path):
     return any(marker in blob for marker in MULTIBOOT_MARKERS)
 
 
-def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
+def create_app(client, frame_addr: int = None, status_addr: int = None, scale: int = 4,
                supervisor=None, log=None, image=None, boot_key=None, flash=None):
     app = Flask(__name__)
 
@@ -154,6 +154,46 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
 
     # One background grabber for every client. client may be None: the emulator
     # can be powered off, and the page still has to load.
+    told_addresses = frame_addr is not None and status_addr is not None
+    frame_addr = frame_addr or 0
+    status_addr = status_addr or 0
+    buffers = {"info": None}
+
+    def ensure_buffers():
+        """Ask the firmware where it keeps its screen, instead of being told.
+
+        The addresses move between builds, and passing one build's for another is how
+        the page ended up drawing a picture that was plausible and offset. The panel
+        path needs no addresses at all, so this concerns only the guest-RAM fallback:
+        it stays unset, and says so, rather than guessing. A --frame-addr on the
+        command line skips the search and is trusted.
+        """
+        if told_addresses:
+            return {"frame": frame_addr, "status": status_addr, "how": "command line"}
+        if buffers["info"] is not None:
+            return buffers["info"]
+        target = active_client()
+        if target is None:
+            return None
+        try:
+            import uvk5_buffers
+            path = image.current.path if image is not None and image.current else None
+            info = uvk5_buffers.discover(target, image_path=path)
+        except Exception as exc:
+            info = {"frame": None, "status": None,
+                    "how": "discovery failed: %s" % exc, "score": 0, "total": 0}
+        buffers["info"] = info
+        if info.get("frame"):
+            pump.set_buffers(info["frame"], info["status"])
+            log.add("qemu", "screen buffers read from the firmware: frame 0x%08X, "
+                            "status 0x%08X (%s; %s/%s bytes agree)"
+                    % (info["frame"], info["status"], info["how"],
+                       info["score"], info["total"]))
+        else:
+            log.add("qemu", "no screen buffers found for this firmware (%s); the panel "
+                            "path does not need them" % info["how"])
+        return info
+
     pump = FramePump(client, frame_addr, status_addr, fps=TARGET_FPS, scale=scale,
                      on_fallback=lambda note: log.add(
                          "qemu", "panel unavailable, drawing from guest RAM at "
@@ -274,7 +314,7 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
             return jsonify(powered=False, status="unreachable", error=str(exc))
         return jsonify(powered=True, speaker=speaker_on(),
                        panel=panel_state(), firmware=firmware_info(),
-                       frame_source=pump.source()[0], **info)
+                       frame_source=pump.source()[0], buffers=ensure_buffers(), **info)
 
     @app.get("/api/panel")
     def api_panel():
@@ -288,11 +328,11 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
         can be compared without guessing.
         """
         source, note = pump.source()
-        body = {"source": source, "note": note,
+        body = {"source": source, "note": note, "buffers": ensure_buffers(),
                 "frame_addr": frame_addr, "status_addr": status_addr}
         target = active_client()
         if target is None:
-            return jsonify(body, powered=False)
+            return jsonify(dict(body, powered=False))
         try:
             body["gram"] = target.command("qom-get", path=PANEL_PATH, property="gram")
             body["invert"] = bool(target.command("qom-get", path=PANEL_PATH,
@@ -1220,10 +1260,14 @@ def _default_firmware():
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--qmp", default="/tmp/uvk5-qmp.sock")
-    ap.add_argument("--frame-addr", type=lambda v: int(v, 0), required=True,
-                    help="address of gFrameBuffer (moves between builds)")
-    ap.add_argument("--status-addr", type=lambda v: int(v, 0), required=True,
-                    help="address of gStatusLine")
+    # Optional, and normally omitted: the addresses move between builds, so the page
+    # finds them by asking the firmware (tools/uvk5_buffers.py). They are only needed
+    # by the guest-RAM fallback -- the panel path, which is what the page uses, needs
+    # no addresses at all. Passing one skips discovery and trusts the value.
+    ap.add_argument("--frame-addr", type=lambda v: int(v, 0), default=None,
+                    help="address of gFrameBuffer; omit to find it in the firmware")
+    ap.add_argument("--status-addr", type=lambda v: int(v, 0), default=None,
+                    help="address of gStatusLine; omit to find it in the firmware")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--scale", type=int, default=4)

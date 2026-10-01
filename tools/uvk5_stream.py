@@ -82,6 +82,21 @@ class FramePump:
                 self._raw = None
             self._generation += 1
 
+    def set_buffers(self, frame_addr: int, status_addr: int):
+        """Point the guest-RAM fallback at this firmware's buffers.
+
+        The addresses move between builds, so they are discovered from the firmware
+        itself (tools/uvk5_buffers.py) rather than hardcoded. Only the fallback uses
+        them: the panel path needs none.
+        """
+        with self._lock:
+            self._frame_addr = frame_addr
+            self._status_addr = status_addr
+            grabber = self._grabber
+            if grabber is not None:
+                self._grabber = FrameGrabber(grabber._client, frame_addr, status_addr,
+                                             self._spool_dir)
+
     def _run(self):
         while not self._stop.is_set():
             started = time.monotonic()

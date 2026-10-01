@@ -493,6 +493,38 @@ substitutes a different source turns a hard error into a plausible wrong answer*
 byte that is off by four is invisible until something that matters lives in those four
 columns. Report the source, and test that the preferred path is actually taken.
 
+### The screen buffers are found, not hardcoded
+
+The flag was `--frame-addr 0x200012BE --status-addr 0x2000163E` -- one build's
+addresses, in the launcher, as a default. Pointed at another firmware that reads
+somewhere else, the picture is plausible and wrong: measured, the build the user
+actually flashed keeps its buffers at `0x2000129E` / `0x2000161E`, exactly 32 bytes
+earlier, so every line landed 32 bytes off. That is what "the other firmware looks
+shifted" was.
+
+Nothing needs to be assumed. The firmware images here are minimal ELFs -- one program
+header, no section headers, no symbol table (tools/bin2elf.py writes them) -- so there
+are no `gFrameBuffer` symbols to read, but there is behaviour: the firmware's own
+buffers hold the same bytes the controller holds, because that is where the driver
+copied them from. `tools/uvk5_buffers.py` slides the controller's memory through SRAM
+and keeps the offset that agrees; it reported 1024/1024 bytes and the right pair of
+addresses for the exact file the user flashed.
+
+So `--frame-addr` and `--status-addr` are optional now, `work/run-webui.ps1` no
+longer passes them (or any machine-specific path), and the page reports what it found:
+
+    buffers: {"frame": 0x2000129E, "status": 0x2000161E, "how": "sram search",
+              "score": 1024, "total": 1024}
+
+Two habits from this, both already in this file in other words: **a default that names
+one machine's or one build's value is a bug waiting for a second build**, and **when
+there are no symbols to read, ask the thing itself** -- the bytes in the buffers are
+the answer, and they can be found by matching rather than guessed.
+
+The panel path needs none of this, and is what the page draws from: the controller's
+memory is the screen for every firmware. The addresses only serve the guest-RAM
+fallback, which is why a failed search is reported and does not stop anything.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
