@@ -573,7 +573,7 @@ not from a guess -- the first version of the header here was 60 bytes because a 
 
 The page writes them through three endpoints (`GET /api/apps`, `POST /api/apps/<n>`,
 `POST /api/apps/<n>/erase`), all of which edit the flash image the emulator boots from --
-so this is page-operable with no WebSerial, no browser permission and no serial protocol.
+so this is page-operable with no WebSerial, no browser permission and no serial protocol. The page shows a table of the 16 slots beside the firmware slots, with a file picker and an Erase button per slot.
 
 Two things measured while wiring it up, both of which changed the code:
 

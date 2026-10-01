@@ -938,6 +938,14 @@ def render_index(scale: int) -> str:
     write a .bin into one, then press Multiboot</span>
   </div>
   <table id="slottable"><tbody></tbody></table>
+  <div class="fwbar">
+    <label>Overlay apps</label>
+    <span id="appstate">-</span>
+    <span class="hint">the Labs edition's apps live in the same external flash (16 slots
+    from 0x102000, the firmware's menu lists the first eight). Pick a .app for a slot to
+    install it — no serial port and no browser permission are involved</span>
+  </div>
+  <table id="apptable"><tbody></tbody></table>
   <div class="screenwrap" id="screenwrap">
     <img id="screen" src="/stream" alt="radio LCD"
          width="{128 * scale}" height="{64 * scale}">
@@ -1268,6 +1276,76 @@ if (flashInput) flashInput.addEventListener('change', async () => {{
 }});
 loadSlots();
 setInterval(loadSlots, 15000);
+// Overlay apps (Labs edition). The same idea as the slots above, in the other half of
+// the external flash: the region the firmware's own App/apps/app_overlay.h defines --
+// 16 slots of 8 KiB from 0x102000, a 64-byte FAP1 header at the slot base and the code
+// one 4 KiB sector later. Upstream installs them from UVStudio over WebSerial; here the
+// bytes go straight into the image the emulator boots, so nothing needs a serial port or
+// a browser permission. The firmware's own menu lists the first eight slots.
+async function loadApps() {{
+  const tb = document.querySelector('#apptable tbody');
+  const state = document.getElementById('appstate');
+  if (!tb) return;
+  try {{
+    const j = await (await fetch('/api/apps')).json();
+    if (j.error) {{ state.textContent = j.error; return; }}
+    state.textContent = 'region 0x' + j.region.toString(16) + ' · ' + j.slot_count +
+      ' slots of ' + Math.round(j.stride / 1024) + ' KiB';
+    tb.innerHTML = '';
+    for (const s of j.slots) {{
+      const tr = document.createElement('tr');
+      const what = s.state === 'app'
+        ? s.name + ' ' + s.version + (s.shortcut && s.shortcut !== 'none'
+            ? ' · ' + s.shortcut : '')
+        : s.state === 'empty' ? '<i>Empty</i>'
+        : '<i>' + s.state + '</i> — not an app';
+      const size = s.state === 'app' ? s.code_size + ' B' : '';
+      tr.innerHTML = '<td>app ' + s.slot + (s.slot < 8 ? '' : ' (after the menu)') +
+        '</td><td>' + what + '</td><td>' + size + '</td><td></td>';
+      const td = tr.lastElementChild;
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = '.app';
+      inp.addEventListener('change', async () => {{
+        const f = inp.files[0];
+        if (!f) return;
+        tr.querySelectorAll('input,button').forEach(b => b.disabled = true);
+        const upload = async (force) => {{
+          const r = await fetch('/api/apps/' + s.slot + (force ? '?force=1' : ''),
+                                {{ method: 'POST', body: f }});
+          return [r, await r.json()];
+        }};
+        let [r, jj] = await upload(false);
+        // A slot can already hold something that is not an app: the factory resource
+        // block of a localised build overlaps this region. The server refuses to destroy
+        // it in silence, so ask, and say so if the answer is yes.
+        if (jj.error && /already holds/.test(jj.error)) {{
+          if (!confirm('app ' + s.slot + ': ' + jj.error + ' -- overwrite it?')) {{
+            tr.querySelectorAll('input,button').forEach(b => b.disabled = false);
+            return;
+          }}
+          [r, jj] = await upload(true);
+        }}
+        if (jj.error) alert('app ' + s.slot + ': ' + jj.error);
+        await loadApps(); poll();
+      }});
+      const er = document.createElement('button');
+      er.textContent = 'Erase';
+      er.addEventListener('click', async () => {{
+        if (!confirm('Erase app slot ' + s.slot + '?')) return;
+        tr.querySelectorAll('input,button').forEach(b => b.disabled = true);
+        const r = await fetch('/api/apps/' + s.slot + '/erase', {{ method: 'POST' }});
+        const jj = await r.json();
+        if (jj.error) alert('app ' + s.slot + ': ' + jj.error);
+        await loadApps(); poll();
+      }});
+      td.append(inp, er);
+      tb.appendChild(tr);
+    }}
+  }} catch (err) {{ state.textContent = 'apps unavailable: ' + err; }}
+}}
+loadApps();
+setInterval(loadApps, 15000);
 // Firmware upload. The file *is* the request body, so the server reads the
 // vector table itself and decides the load offset: an application image and a
 // full-flash image need different ones, and the wrong one fails silently.

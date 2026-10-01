@@ -1130,3 +1130,32 @@ class TestAppEndpoints(unittest.TestCase):
         r = self.client.post("/api/apps/16", data=self.blob)
         self.assertEqual(r.status_code, 400)
         self.assertIn("out of range", r.get_json()["error"])
+
+
+class TestAppsFrontEnd(unittest.TestCase):
+    """The page must offer the apps without a serial port or a browser permission."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.flash = os.path.join(self.dir, "flash.img")
+        with open(self.flash, "wb") as fh:
+            fh.write(b"\xff" * 0x200000)
+        self.app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000,
+                                    flash=FlashSlot(self.flash))
+        self.page = self.app.test_client().get("/").get_data(as_text=True)
+
+    def test_the_page_has_an_apps_table_that_reads_the_endpoint(self):
+        self.assertIn('id="apptable"', self.page)
+        self.assertIn("/api/apps", self.page)
+        self.assertIn("loadApps", self.page)
+
+    def test_the_page_says_where_the_apps_live(self):
+        self.assertIn("0x102000", self.page)
+
+    def test_the_page_never_asks_for_a_serial_port_or_audio(self):
+        # WebSerial is how upstream installs these; here the image is edited directly, so
+        # a permission prompt would be asking for something this page never uses.
+        self.assertNotIn("navigator.serial", self.page)
+        self.assertNotIn("getUserMedia", self.page)
+        self.assertNotIn("AudioContext", self.page)
