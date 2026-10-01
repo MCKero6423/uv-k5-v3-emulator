@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""The app installer must refuse anything the firmware would show as APP ERROR.
+
+The format is the firmware's own (App/apps/app_overlay.h): a 64-byte FAP1 header with a
+zlib CRC-32 over the code, code at slot_base + 0x1000, 16 slots of 8 KiB from 0x102000.
+These tests build blobs here, so they need no emulator and no third-party binary.
+"""
+import os
+import struct
+import unittest
+import zlib
+
+import uvk5_apps as A
+
+
+def image(size=2 * 1024 * 1024, fill=0xFF):
+    return bytearray([fill]) * size
+
+
+class TestFormat(unittest.TestCase):
+    def test_a_built_blob_round_trips(self):
+        blob = A.build(b"\x00\x01\x02\x03" * 8, "Beam", "1.0", shortcut="beam")
+        info = A.parse(blob)
+        self.assertEqual(info["name"], "Beam")
+        self.assertEqual(info["version"], "1.0")
+        self.assertEqual(info["code_size"], 32)
+        self.assertEqual(info["shortcut"], "beam")
+        self.assertTrue(info["committed"])
+        self.assertEqual(info["vma"], A.OVERLAY_VMA)      # 0x20000280, in SRAM
+        self.assertEqual(info["capabilities"], 0)        # build() sets none by default
+
+    def test_the_magic_is_the_one_the_firmware_defines(self):
+        self.assertEqual(A.MAGIC.to_bytes(4, "little"), b"FAP1")
+        self.assertEqual(A.REGION_BASE, 0x00102000)
+        self.assertEqual(A.SLOT_STRIDE, 0x2000)
+        self.assertEqual(A.SLOT_COUNT, 16)
+        self.assertEqual(A.build(b"x", "A")[:4], b"FAP1")
+        self.assertEqual(A.HDR_SIZE, 64, "the header is 64 bytes in app_overlay.h")
+        self.assertEqual(A.OVERLAY_VMA, 0x20000280, "the overlay runs from SRAM")
+
+    def test_a_bad_magic_is_refused(self):
+        blob = bytearray(A.build(b"code", "A"))
+        blob[0:4] = b"FMB1"
+        with self.assertRaises(A.AppError):
+            A.parse(bytes(blob))
+
+    def test_a_crc_that_does_not_match_the_code_is_refused(self):
+        blob = bytearray(A.build(b"code", "A"))
+        blob[A.HDR_SIZE] ^= 0xFF          # change the code, leave the CRC
+        with self.assertRaises(A.AppError) as caught:
+            A.parse(bytes(blob))
+        self.assertIn("CRC-32", str(caught.exception))
+
+    def test_code_over_the_overlay_budget_is_refused(self):
+        with self.assertRaises(A.AppError):
+            A.build(b"x" * (A.APP_OVERLAY_MAX + 1), "Big")
+
+    def test_a_truncated_blob_is_refused(self):
+        blob = A.build(b"x" * 100, "A")
+        with self.assertRaises(A.AppError):
+            A.parse(blob[:A.HDR_SIZE + 50])
+
+    def test_capabilities_round_trip(self):
+        """An app may require a resident facility; it lives in the header's spare bytes."""
+        blob = A.build(b"code", "FM", capabilities=0x01)
+        self.assertEqual(A.parse(blob)["capabilities"], 0x01)
+
+    def test_an_unknown_shortcut_is_refused(self):
+        with self.assertRaises(A.AppError):
+            A.build(b"x", "A", shortcut="solitaire")
+
+
+class TestInstall(unittest.TestCase):
+    def test_install_puts_the_header_and_the_code_where_the_firmware_looks(self):
+        img = image()
+        blob = A.build(b"\xAA" * 200, "Tetris", "1.0")
+        info = A.install(img, 1, blob)
+        base = A.REGION_BASE + A.SLOT_STRIDE
+        self.assertEqual(bytes(img[base:base + 4]), b"FAP1")
+        self.assertEqual(bytes(img[base + A.CODE_OFFSET:base + A.CODE_OFFSET + 4]), b"\xAA" * 4)
+        # the gap a real erase leaves is 0xFF, not zeroes
+        self.assertEqual(bytes(img[base + 64:base + A.CODE_OFFSET]), b"\xFF" * (A.CODE_OFFSET - 64))
+        self.assertEqual(info["name"], "Tetris")
+
+    def test_install_erases_what_was_there_before(self):
+        img = image()
+        A.install(img, 3, A.build(b"\x11" * 400, "Old", "1.0"))
+        A.install(img, 3, A.build(b"\x22" * 100, "New", "1.0"))
+        base = A.REGION_BASE + 3 * A.SLOT_STRIDE
+        self.assertNotIn(b"\x11", bytes(img[base:base + A.SLOT_STRIDE]))
+        self.assertEqual(A.read_slot(bytes(img), 3)["name"], "New")
+
+    def test_listing_reports_the_slot_and_the_name(self):
+        img = image()
+        A.install(img, 0, A.build(b"\x01" * 64, "Beam"))
+        A.install(img, 15, A.build(b"\x02" * 64, "Plasma"))
+        found = A.list_apps(bytes(img))
+        self.assertEqual([(a["slot"], a["name"]) for a in found], [(0, "Beam"), (15, "Plasma")])
+
+    def test_an_empty_slot_is_not_an_app(self):
+        self.assertEqual(A.list_apps(bytes(image())), [])
+
+    def test_a_firmware_in_the_same_slot_is_named_as_one(self):
+        """The 64-byte headers are shared: FMB1 is a firmware, FAP1 is an app."""
+        img = image()
+        base = A.REGION_BASE
+        img[base:base + 4] = b"FMB1"
+        img[base + 8:base + 12] = struct.pack("<I", 114 * 1024)
+        found = A.list_apps(bytes(img))
+        self.assertEqual(found[0]["kind"], "firmware")
+
+    def test_erase_clears_the_slot(self):
+        img = image()
+        A.install(img, 2, A.build(b"\x33" * 64, "Gone"))
+        A.erase(img, 2)
+        self.assertIsNone(A.read_slot(bytes(img), 2))
+
+    def test_a_slot_outside_the_region_is_refused(self):
+        with self.assertRaises(A.AppError):
+            A.install(image(), 16, A.build(b"x", "A"))
+
+
+class TestRealFile(unittest.TestCase):
+    """Runs against a downloaded Beam.app when one is present; skipped otherwise."""
+
+    def test_a_real_upstream_app_parses(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "work", "apps", "Beam.app")
+        if not os.path.exists(path):
+            self.skipTest("no work/apps/Beam.app; download one from the upstream archive")
+        with open(path, "rb") as fh:
+            info = A.parse(fh.read())
+        self.assertEqual(info["name"], "Beam")
+        self.assertEqual(info["shortcut"], "beam")
+        self.assertTrue(info["committed"])
+
+
+if __name__ == "__main__":
+    unittest.main()

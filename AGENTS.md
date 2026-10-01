@@ -550,6 +550,27 @@ and still starts before anything waits on QEMU. **A rewrite that preserves the p
 were fixing while losing another is the expensive kind**, and this one hid because the log
 still "worked" for the binary screen stream.
 
+### Overlay apps are a flash region, and the page can write it
+
+The Labs edition runs small overlay apps (Tetris, Breakout, Plasma, Cube3D, Beam, Beacon,
+FoxHunt, BroadcastFM). Upstream installs them from UVStudio over WebSerial; here they are
+bytes in the external flash image, which the page already owns -- so no serial protocol and
+no browser permission are involved, just the same bytes at the same offsets.
+
+The layout is the firmware's own, read out of the header it compiles rather than inferred
+(`App/apps/app_overlay.h`): `APP_REGION_BASE 0x00102000` -- right behind the two state
+markers -- `APP_SLOT_STRIDE 0x2000`, `APP_CODE_OFFSET 0x1000`, 16 slots. A slot holds a
+64-byte `app_header_t` (magic `FAP1`, zlib CRC-32 over the code, name, version, vma
+0x20000280, capabilities) and its code one 4 KiB sector later. `tools/uvk5_apps.py` parses,
+validates, lists, installs and erases them; `tools/test_uvk5_apps.py` covers the refusals.
+
+Two things are worth knowing. **The 64-byte header is shared with the multiboot slots**:
+`FMB1` means firmware, `FAP1` means app, which is why "install app to slot 1" and "put a
+firmware in slot 1" touch the same external flash and the power-on menu lists both. And the
+region is found the same way the screen buffers were: from the firmware's own constants,
+not from a guess -- the first version of the header here was 60 bytes because a field
+(`vma`) was missing, and the real `Beam.app` bytes said so immediately.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
