@@ -37,12 +37,13 @@ import sys
 import tempfile
 import time
 
+import uvk5_socket
+import uvk5_testenv
+
 HERE = pathlib.Path(__file__).resolve().parent
 SIM = HERE.parent
-QEMU = pathlib.Path(os.environ.get(
-    "QEMU", "/root/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm"))
-ELF = pathlib.Path(os.environ.get(
-    "ELF", "/root/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf"))
+QEMU = uvk5_testenv.qemu()
+ELF = uvk5_testenv.firmware()
 PRISTINE = SIM / "assets/pristine/flash-pristine.img.gz"
 
 FRAME_ADDR = 0x200013DC
@@ -51,10 +52,14 @@ BOOT_SECONDS = 24
 
 
 class Qmp:
-    def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    def __init__(self, endpoint):
+        # A socket or an endpoint: QEMU's QMP takes one client, so the caller that
+        # waited for it hands its connection in.
+        if hasattr(endpoint, "recv"):
+            self.sock = endpoint
+        else:
+            self.sock = uvk5_socket.connect(endpoint, timeout=30)
         self.sock.settimeout(25)
-        self.sock.connect(path)
         self.buf = b""
         self._read()
         self.cmd("qmp_capabilities")
@@ -97,30 +102,26 @@ class Qmp:
 
 
 def main():
-    for tool in (QEMU, ELF, PRISTINE):
-        if not tool.exists():
-            print(f"SKIP  missing {tool}")
-            return 0
+    for tool, what in ((QEMU, "QEMU"), (ELF, "firmware"), (PRISTINE, "pristine flash image")):
+        if tool is None or not tool.exists():
+            return uvk5_testenv.skip("%s is missing (%s); see the README Quick start"
+                                     % (what, tool or "not found"))
 
     with tempfile.TemporaryDirectory() as tmp:
         img = pathlib.Path(tmp) / "flash.img"
         img.write_bytes(gzip.decompress(PRISTINE.read_bytes()))
-        sock = pathlib.Path(tmp) / "qmp.sock"
+        sock = uvk5_socket.server_endpoint("qmp", directory=str(tmp))
 
         proc = subprocess.Popen(
             [str(QEMU), "-M", f"uv-k5-v3,flash-image={img}",
              "-nographic", "-monitor", "none",
-             "-qmp", f"unix:{sock},server=on,wait=off",
+             "-qmp", sock,
              "-kernel", str(ELF)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            for _ in range(BOOT_SECONDS * 4):
-                if sock.exists():
-                    break
-                time.sleep(0.25)
-            else:
-                print("FAIL  QMP socket never appeared")
-                return 1
+            # Qmp() below connects, and uvk5_socket retries until QEMU's QMP answers, so
+            # there is no socket path to wait for -- on Windows there would not be one.
+            time.sleep(BOOT_SECONDS)
             time.sleep(BOOT_SECONDS)
 
             qmp = Qmp(str(sock))

@@ -28,21 +28,21 @@ Usage:
 import argparse
 import json
 import os
+
+import uvk5_socket
+import uvk5_testenv
 import re
 import socket
 import subprocess
 import sys
 import time
 
-HOME = os.path.expanduser("~")
-QEMU = os.environ.get(
-    "QEMU_BIN", f"{HOME}/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm")
-ELF = os.environ.get(
-    "ELF", f"{HOME}/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf")
+QEMU = uvk5_testenv.qemu()
+ELF = uvk5_testenv.firmware()
 HERE = os.path.dirname(os.path.abspath(__file__))
 FLASH = os.path.join(os.path.dirname(HERE), "assets", "flash.img")
 
-QMP = "/tmp/uvk5-keypad-test-qmp.sock"
+QMP = uvk5_socket.server_endpoint("qmp")
 GDB_PORT = "1239"
 
 # App/misc.c: key_debounce_10ms = 2 (20 ms), key_repeat_delay_10ms = 40 (400 ms).
@@ -64,28 +64,33 @@ class Emu:
         for path in (QMP,):
             if os.path.exists(path):
                 os.unlink(path)
-        for path, what in ((QEMU, "QEMU binary"), (ELF, "firmware ELF"),
-                           (FLASH, "flash image")):
-            if not os.path.exists(path):
-                sys.exit(f"missing {what}: {path}")
+        _missing = uvk5_testenv.missing([
+            (QEMU, "QEMU binary", "set QEMU=/path/to/qemu-system-arm or put it on PATH"),
+            (ELF, "firmware ELF", "run tools/fetch_firmware.py or set ELF=..."),
+            (FLASH, "flash image", "run tools/make_flash.py"),
+        ])
+        if _missing:
+            print("SKIP: %s" % _missing)
+            sys.exit(0)
 
         self.proc = subprocess.Popen(
             [QEMU, "-M", f"uv-k5-v3,flash-image={FLASH}", "-nographic",
-             "-monitor", "none", "-qmp", f"unix:{QMP},server=on,wait=off",
+             "-monitor", "none", "-qmp", QMP,
              "-kernel", ELF, "-gdb", f"tcp::{GDB_PORT}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         for _ in range(150):
             try:
-                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self.sock.connect(QMP)
+                # Connecting is the test: a unix path can be waited for as a file, a
+                # TCP endpoint cannot, and this works for both.
+                self.sock = uvk5_socket.connect(QMP, timeout=2)
                 break
             except OSError:
                 if self.proc.poll() is not None:
                     sys.exit("QEMU exited during startup")
                 time.sleep(0.1)
         else:
-            sys.exit(f"QMP socket never appeared at {QMP}")
+            sys.exit(f"QMP never accepted a connection at {QMP}")
 
         self.buf = b""
         self._read()                       # greeting
@@ -134,7 +139,7 @@ class Emu:
             ("kr0", "*(char*)&gKeyReading0"),
             ("cursor", f"*(unsigned char*){GMENUCURSOR_ADDR}"),
         ]
-        args = ["gdb-multiarch", "-batch", "-ex", "set confirm off",
+        args = [str(uvk5_testenv.gdb()), "-batch", "-ex", "set confirm off",
                 "-ex", "set pagination off",
                 "-ex", f"target remote :{GDB_PORT}"]
         for name, expr in exprs:
@@ -157,6 +162,10 @@ class Emu:
 
 
 def main():
+    if uvk5_testenv.gdb() is None:
+        return uvk5_testenv.skip("gdb-multiarch is missing; this test reads the guest over "
+                                 "a gdb attach, which has not been ported to the QMP memsave "
+                                 "route the page uses")
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()

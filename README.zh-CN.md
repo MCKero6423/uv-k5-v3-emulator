@@ -32,6 +32,7 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
 | --- | --- |
 | 启动到主循环 | 可用，约 5 秒 |
 | LCD 内容 | 可用，经 `tools/screenshot.py` |
+| 显示对比度 / 反显 | 面板级设置，从控制器读取；反显还会改变渲染出的画面 |
 | SPI flash、设置、校准数据 | 可用，且断电保留 |
 | 频率输入 | 可用，按波段分别存储并保留 |
 | 键盘与菜单导航 | 可用，含从省电模式唤醒 |
@@ -71,6 +72,9 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
     *.zh-CN.md               中文翻译，与英文版同步维护
     docs/screenshots/        本 README 用到的 LCD 截图
     tools/                   运行、截图、注入按键、探查状态
+      bin2elf.py             把发行版 .bin 包成 QEMU 能当内核加载的 ELF
+      make_flash.py          生成 assets/flash.img；--blob 可把额外数据（中文版
+                             需要的字体包）放到指定偏移
       keypad_test.py         键盘回归测试，自己启动实例
       test_flash_persist.py  flash 写入能跨断电保留
       test_freq_entry.py     输入的频率生效并保留
@@ -101,6 +105,57 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
       （另有一批临时探针脚本 —— scan_trace.sh、gpio_watch.py 等 ——
        留着是因为随手就能用，不是因为它们打磨过）
     harness/, stubs/, shim/, tests/   CW 时序链的宿主机构建（阶段 A）
+
+## 仓库里没有什么
+
+有两类东西是刻意不放的，也都不应该提交：
+
+- **固件**：发行镜像、汉化/改版构建、引导 dump 都属于它们的作者，不属于这个项目。
+  需要时用 `tools/fetch_firmware.py` 从上游归档取一份到 `assets/firmware/`，该目录已被忽略。
+- **任何从真电台读出来的数据**：`work/data.bin` 是一份 EEPROM dump——别人机器上的设置与校准。
+  它不是构建产物。它现在已被忽略，测试改用 `assets/pristine/` 自己拼 flash 镜像。
+
+`assets/pristine/flash-pristine.img.gz` 与 `assets/calibration.bin` 是会随仓库分发的：它们是
+一对 2 KB 的**合成**数据，由 `tools/make_flash.py` 拼成 flash 镜像，不是电台里的数据。
+
+`work/` 里其余都是临时产物——镜像、日志、抓取结果。里面那四个脚本是**刻意跟踪**的，因为它们
+记录了这台机器怎么驱动；其他内容一律忽略。
+
+**如果这些东西已经在历史里了，现在删掉并不够。** 对象仍然可达，所以要把仓库公开就得先清理历史
+（`git filter-repo`）或另起一个仓库。推送前先查一下：
+
+    git log --stat -- work/data.bin assets/firmware
+
+## 快速开始
+
+从克隆到网页上跑起电台，大约五分钟。
+
+    # 1. 把机器模型打进 QEMU 7.2 源码树并编译。手工做法是拷三个文件、改 Kconfig 与
+    #    meson.build、再 configure 和 ninja；这个脚本就是那几步（下面"构建"一节有说明）。
+    QEMU_SRC=~/src/qemu-7.2 bash tools/setup_qemu.sh
+
+    # 2. 拿一份可运行的固件。仓库不再分发固件——这个工具会从上游项目的归档里取一份到
+    #    assets/firmware/，并打印它的哈希。
+    python3 tools/fetch_firmware.py
+
+    # 3. 固件保存设置所依赖的外部 flash 镜像。
+    python3 tools/make_flash.py
+
+    # 4. 跑起来。
+    python3 tools/webui.py --qemu ~/src/qemu-7.2/build/qemu-system-arm \
+        --elf assets/firmware/f4hwn.fieldops.v6.0.0.bin     # 然后打开 http://127.0.0.1:8080/
+
+`--frame-addr` 与 `--status-addr` 默认值对应一份已知构建，换构建会变——怎么找见
+[网页远控](#网页远控)。Windows 上 `work/run-webui.ps1` 把第 4 步按本机路径包好了。
+
+把任意 `.bin` 拖到页面上即可启动。页面上的 **Firmware slots** 表可以读写 flash 镜像里
+多系统固件的四个槽位，**Multiboot** 会按住 MENU 重启以进入多系统菜单——前提是那份构建
+确实带菜单：页面会标注不带菜单的构建，因为那时这个按钮做不了任何事。
+
+再确认一下没坏：
+
+    bash tools/run_tests.sh -q     # 约 15 秒，不需要模拟器
+    bash tools/run_tests.sh        # 全部；需要第 1 步那棵树
 
 ## 构建
 
@@ -142,6 +197,7 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
     python3 tools/test_flash_persist.py
     python3 tools/test_freq_entry.py
     python3 tools/test_serial_rx.py
+    python3 tools/test_slot_serial.py
     python3 tools/test_bk4819.py
     bash tools/test_bk4819_readback.sh
     python3 tools/test_smeter.py
@@ -218,9 +274,21 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
 | `POST /api/key` | `{"key": "MENU", "action": "down"}` — 也可以是 `up` 或 `tap` |
 | `POST /api/ptt` | `{"held": true}` — 按住 PTT，`false` 释放 |
 | `POST /api/release-all` | 释放所有按键，万一有键卡住 |
-| `GET /api/status` | QMP `query-status`，另含 `speaker` 字段 |
+| `GET /api/status` | QMP `query-status`，另含 `speaker`、`panel` 与 `firmware` |
+| `GET /api/firmware` | 当前镜像，以及它将按什么形态加载 |
+| `POST /api/firmware` | 请求体就是 `.bin` 或 `.elf`；启动它并重启模拟器 |
+| `GET /api/slots` | 当前 flash 镜像里的固件槽 |
+| `POST /api/slots/<n>` | 请求体是一个 `.bin`；写进槽 `n` 并重启 |
+| `POST /api/slots/<n>/erase` | 擦除槽 `n` |
+| `POST /api/flash` | 请求体是一份 flash 镜像；之后就用它 |
 
-画面用 QMP `memsave` 读取，每帧约 1.35 ms，且 guest 全程继续运行。这里有两个细节很容易搞错：
+画面现在取自显示控制器自己的内存：对面板的 `gram` 属性做一次 QMP `qom-get`。
+这样无论固件是谁写的、把缓冲区放在哪里，画面都是对的 —— 同一祖先改出来的各个版本
+显示逻辑也各不相同，多系统那版干脆把图像放在完全不同的位置。
+
+下面这段是**旧的取帧路径**（用 QMP `memsave` 直接读 guest RAM 里的
+`gFrameBuffer` 与 `gStatusLine`，每帧约 1.35 ms），它保留为"没有面板模型的模拟器"
+的回退路径；接下来的两条注意事项针对的正是它：
 
 - **必须用 `memsave`，不能用 `pmemsave`。** 帧缓冲符号是 CPU 虚拟地址。`pmemsave` 会把参数
   当成物理地址，返回一整块零 —— 于是画面渲染成全空白，而且哪里都不报错。
@@ -232,6 +300,55 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
 - **QMP socket 只接受一个客户端。** 服务运行期间，`tools/key.py` 无法连到同一个模拟器。
 - **没有任何认证。** 任何能访问到这个端口的人都能完全控制这台模拟电台。正因如此，
   它默认只绑定 loopback。
+
+### 从页面上传固件
+
+把 `.bin` 直接拖到页面上，或用 "Firmware" 选择文件，服务器就会存下它并启动它。
+不需要包成 ELF，也不需要你去查地址。
+
+镜像有两种形态，加载地址不同：
+
+| 形态 | 怎么认出来 | 加载地址 |
+| --- | --- | --- |
+| 应用镜像 | 复位向量在 `0x08002800` 之后 | `0x08002800` |
+| 整片镜像 | 复位向量落在引导区（`0x08000000`..`0x080027ff`） | `0x08000000` |
+
+`.elf` 自带程序头，两者都不需要。形态是**从镜像自己的头两个字读出来的**
+（主机侧 `tools/uvk5_image.py`，机器侧 `uvk5_sniff_app_offset()`），不是靠标志位或
+文件名，因为判断错的症状是**静默**的：镜像整体偏 `0x2800` 字节，第一次取指读到的是
+随便什么数据。不是可启动镜像的文件会以 400 拒绝，电台继续跑原来的固件。
+
+上传文件放在 `work/firmware/`（`UVK5_UPLOAD_DIR` 可改）。模拟器正在运行时上传会
+让它重启一次 —— 镜像是 QEMU 启动时选定的。
+
+这里两种形态都端到端验证过：应用 `.bin`、`.elf`，以及一个"引导入口跳到
+`0x08002800` 处应用"的整片镜像，最终都到达同一幅画面。
+
+### 固件槽，与多系统版固件
+
+v6.0.0 版把开机菜单和四个固件槽放在外部 flash 里：开机按住 MENU 就会列出它们，选中一个
+会用该槽的镜像重刷内部 flash 并复位。两部分都能从网页上操作。
+
+- **固件槽**一栏每个槽一行，显示名字、版本、大小，以及头部 CRC-32 与镜像是否一致；可以
+  往某个槽写入一个 `.bin`，或擦除该槽。改动只写**工作副本**
+  （`work/firmware/flash-current.img`），绝不改服务器启动时指定的那份文件，改完自动重启
+  模拟器来生效。
+- **Multiboot**（或 Shift+M）会**从复位起按住 MENU** 重启模拟器。网页的按键事件做不到
+  这件事，因为固件在复位后的头几毫秒就采样键盘。机器侧对应
+  `-M uv-k5-v3,boot-key=MENU` 或 `UVK5_BOOT_KEY`，保持时间由 `UVK5_BOOT_KEY_MS`
+  决定（默认 8 秒：开机路径可能花 20 秒把当前固件"采纳"进槽 0，之后才会去采样键盘）。
+- `tools/uvk5_slots.py` 做同样的事但离线：把槽写进 flash 镜像，并打印每个槽的内容。
+
+布局来自固件源码 `App/driver/mb_flash.h`：槽 0 在 `0x020000`，是内部镜像的备份；槽 1..4
+从 `0x040000` 起、每 128 KiB 一个；镜像从槽内偏移 4 KiB 开始；64 字节头部含魔数
+`FMB1`、镜像大小和 CRC-32。固件自带的 `0x0720`..`0x0727` 串口命令也按同样方式写槽，
+Windows 上的工具走的就是那条路。
+
+有两种行为看起来像模拟器出错，其实不是：当**状态标记损坏**而槽 0 有效时，固件会停在
+`STATE ERROR` 画面上以保护 Main；当状态标记**缺失**时，它会在菜单出现前把当前固件"采纳"
+进槽 0（重写外部 flash）。写槽时会顺手擦掉那两个标记扇区，让它能重新判断。模型里的内部
+flash 是可编程的（`0x40022000`：解锁、页擦除、编程、EOP、永不 BSY），所以恢复槽位是真的
+替换了复位后 CPU 执行的镜像。
 
 ### 从别处访问
 
@@ -299,7 +416,8 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
     SPI2   0x40003800   flash
     ADC1   0x40012400
 
-已建模：RCC、GPIO、ADC、两个 SPI 控制器、DMA1、TIM2，以及 PY25Q16 flash。
+已建模：RCC、GPIO、ADC、两个 SPI 控制器、DMA1、TIM2、PY25Q16 flash，以及
+ST7565 显示控制器自身的设置（对比度、反显、开屏/关屏）。
 其余全部由一个带日志的兜底模块响应 —— **那份日志正是判断下一个值得建模的东西的依据。**
 
 固件能启动之前，有七件事必须做对，每一件都是靠观察它停在哪里发现的：
@@ -351,6 +469,39 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
 **固件源码原样编译是刻意的。** 为了让它们能在宿主机上构建而去修改，会让测试与电台实际运行的
 代码逐渐脱节。`CW_ReadKeys` 里的防抖是**照抄**而不是打桩的，因为它的不对称性
 （要连续三次读取才登记按下，而释放是立即的）本身就是被测时序行为的一部分。
+
+## 显示控制器自己的设置
+
+对比度（`SetCtr`）和反显（`SetInv`）是发给 ST7565 的命令，不是帧缓冲内容 ——
+`0x81 <值>` 与 `0xA6`/`0xA7` —— 所以 `gFrameBuffer` 一个字节都不变，任何渲染这份缓冲的
+界面都看不出效果。这就是 SPI1 后面挂了一个小型 `TYPE_ST7565` 的原因（A0 接 PA6、CS 接 PB2，
+即 `App/driver/st7565.c` 用的引脚）。它解析命令流并暴露三个**只读**属性：
+
+    qom-get /machine/panel invert        # 0xA6 / 0xA7 之后的值
+    qom-get /machine/panel contrast      # 0x81 后面那个值
+    qom-get /machine/panel display-on    # 0xAE / 0xAF 之后的值
+
+`tools/uvk5_lcd.py` 在渲染时应用反显，因为这个效果是完全确定的，于是那个菜单项在网页里
+看得见了。对比度是模拟量（玻璃有多黑），只报告不渲染。三者都在 `/api/status` 里，
+页面上显示在喇叭图标旁边。`display-on` 只报告不动作：软复位（`0xE2`）是否清掉那个锁存位
+无法确证，拿不确定的语义去把画面变黑，比不动它更糟。
+
+## Windows 上
+
+模拟器、模型和工具本身是可移植的，不可移植的是外围包装。有四处不同，现在都在仓库内处理了：
+
+- **QMP 走 TCP。** Windows 版 QEMU 无法创建 unix socket，所以端点除了路径还可以是
+  `host:port` —— `tools/uvk5_qmp.py`、`tools/key.py`、`tools/uvk5_supervisor.py` 两者都收。
+- **一处编译修正。** MSYS2 的 mingw-w64 能原样编译 QEMU 7.2，只有 `qemu/py32f071.c` 需要
+  `#include "qapi/visitor.h"`（`visit_type_uint64`），原版源码树不会间接带入。
+- **发行版 `.bin` 不是内核镜像。** `armv7m_load_kernel()` 会把裸二进制加载到给它的地址上，
+  而这里那个地址是 flash 的**别名区**，于是 `.bin` 会整体高 0x2800 字节、永远起不来。
+  `tools/bin2elf.py` 给它套一个带正确程序头的 ELF32/ARM，这才是 `-kernel` 要的东西。
+- **中文字体包在 SPI flash 里**，不在固件里：`tools/make_flash.py --blob 0:pack.uf2`
+  把每个 UF2 块放到它自己的目标地址。不做这一步，字体区读出来就是 0xFF。
+
+`work/` 里留着一次 Windows 移植的记录：启动脚本、用固件源码验证过的取帧地址，
+以及那些花掉时间的失败。
 
 ## 许可
 

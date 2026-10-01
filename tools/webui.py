@@ -20,15 +20,32 @@ Two things worth knowing:
 import argparse
 import json
 import os
+import shutil
 import time
 
 from flask import Flask, Response, jsonify, request
 
+from uvk5_image import ImageError, detect as detect_image
+from uvk5_slots import (SLOT_COUNT, erase_slot_file, slots_json,
+                        write_slot_file)
 from uvk5_keys import KEYS, is_valid, normalise
+from uvk5_lcd import PANEL_PATH
 from uvk5_logs import LogBuffer
 from uvk5_stream import FramePump
 
 KEYPAD_PATH = "/machine/keypad"
+
+# Uploaded firmware. Kept next to the checkout rather than in the system temp
+# directory: a firmware is something the user chose to load, and losing it on
+# reboot would mean uploading it again. UVK5_UPLOAD_DIR overrides it.
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024
+UPLOAD_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "work", "firmware")
+
+
+def upload_dir() -> str:
+    return os.environ.get("UVK5_UPLOAD_DIR", UPLOAD_DIR)
 AUDIO_PATH = "/machine/audio"
 
 # Firmware thresholds, from App/misc.c:
@@ -110,8 +127,25 @@ KEY_BINDINGS = {
 POWER_ACTIONS = ("on", "off", "reset", "pause", "resume")
 
 
+# The multi-system boot menu lives inside the firmware, not in a separate
+# bootloader, and the builds that ship without it (some localised releases are
+# built "without multi-system") look identical until you hold MENU at power-on
+# and nothing happens. Its banner strings are the quickest tell.
+MULTIBOOT_MARKERS = (b"F4HWN MULTIBOOT", b"RESTORE REFUSED", b"SLOT NOT VALID")
+
+
+def image_has_multiboot(path):
+    """True when @path looks like a build with the boot menu in it."""
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read()
+    except OSError:
+        return None
+    return any(marker in blob for marker in MULTIBOOT_MARKERS)
+
+
 def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
-               supervisor=None, log=None):
+               supervisor=None, log=None, image=None, boot_key=None, flash=None):
     app = Flask(__name__)
 
     if log is None:
@@ -124,6 +158,7 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
     pump.start()
     app.config["PUMP"] = pump
     app.config["SUPERVISOR"] = supervisor
+    app.config["IMAGE"] = image
 
     def client_ip():
         """The address of whoever made this request.
@@ -195,6 +230,35 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
     def index():
         return Response(render_index(scale), mimetype="text/html")
 
+    def panel_state():
+        """The display controller's own settings: invert, contrast, display on/off.
+
+        These are panel state, not framebuffer content, so they are invisible in the
+        pixels themselves -- a menu entry that changes them otherwise looks like it
+        did nothing. None of them when the emulator is off.
+        """
+        target = active_client()
+        if target is None:
+            return None
+        try:
+            return {
+                "invert": bool(target.command("qom-get", path=PANEL_PATH,
+                                              property="invert")),
+                "contrast": int(target.command("qom-get", path=PANEL_PATH,
+                                               property="contrast")),
+                "display": bool(target.command("qom-get", path=PANEL_PATH,
+                                               property="display-on")),
+            }
+        except Exception as exc:
+            log.add("qemu", f"panel state unavailable: {exc}")
+            return None
+
+    def firmware_info():
+        """The loaded image, or None. Its shape and offset come from uvk5_image."""
+        if image is None or image.current is None:
+            return None
+        return image.current.as_dict()
+
     @app.get("/api/status")
     def api_status():
         target = active_client()
@@ -205,7 +269,181 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
         except Exception as exc:
             # The emulator can die under us; that is a state to report, not a 500.
             return jsonify(powered=False, status="unreachable", error=str(exc))
-        return jsonify(powered=True, speaker=speaker_on(), **info)
+        return jsonify(powered=True, speaker=speaker_on(),
+                       panel=panel_state(), firmware=firmware_info(), **info)
+
+    @app.get("/api/firmware")
+    def api_firmware():
+        info = firmware_info()
+        if info is not None and image is not None:
+            info = dict(info, multiboot=image_has_multiboot(image.path))
+        return jsonify(loaded=info is not None, firmware=info)
+
+    @app.post("/api/firmware")
+    def api_firmware_upload():
+        """Boot an uploaded firmware image.
+
+        The request body is the image itself. Its shape is read out of the vector
+        table (see uvk5_image) rather than taken on trust, because loading an image
+        at the wrong offset fails silently: it runs 0x2800 bytes off and the first
+        fetch reads whatever data is there.
+        """
+        if image is None:
+            return jsonify(error="this server was started without firmware control"), 409
+        name = (request.args.get("name")
+                or request.headers.get("X-Filename") or "firmware.bin")
+        name = os.path.basename(name.replace("\\", "/")) or "firmware.bin"
+        data = request.get_data(cache=False, as_text=False)
+        if not data:
+            return jsonify(error="no image in the request body"), 400
+        if len(data) > MAX_UPLOAD_BYTES:
+            return jsonify(error="%d bytes is too large" % len(data)), 413
+        directory = upload_dir()
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        # Validate before touching the running emulator: a file that is not an image
+        # should leave the radio exactly as it was, not powered off with a 400.
+        try:
+            info = detect_image(path)
+        except ImageError as exc:
+            return jsonify(error=str(exc), saved=path), 400
+
+        if supervisor is not None and supervisor.is_running():
+            # The image is picked when the process is spawned, so it has to come
+            # back up to take effect. Off first, then adopt, so nothing boots the
+            # previous image in between.
+            supervisor.power_off()
+            restart = True
+        else:
+            restart = False
+        image.set(info)
+        log.add("firmware", "%s (%s, %d bytes)" % (name, info.kind, info.size),
+                ip=client_ip())
+        if restart:
+            try:
+                supervisor.power_on()
+            except Exception as exc:
+                log.add("firmware", "restart failed: %s" % exc)
+                return jsonify(firmware=info.as_dict(), restarted=False,
+                               error=str(exc)), 500
+        body = dict(info.as_dict(), multiboot=image_has_multiboot(path))
+        return jsonify(firmware=body, restarted=restart)
+
+    # ------------------------------------------------------------- firmware slots
+    #
+    # The multi-system firmware keeps four firmware slots plus a backup of the
+    # internal image in the external flash, in the layout App/driver/mb_flash.h
+    # defines (an FMB1 header plus a CRC-32, image one sector into the slot).
+    # Editing them means editing the flash image the emulator boots from, and that
+    # image is chosen when the process is spawned -- so an edit powers the emulator
+    # off, rewrites the image and powers it on again.
+    #
+    # It rewrites a working copy, never the file the server was pointed at: that may
+    # be the radio's real calibration dump.
+    def _edit_flash(edit):
+        # Power off, apply edit(path) to a working copy, power on again.
+        if flash is None:
+            raise RuntimeError("this server was started without flash control")
+        work = os.path.join(upload_dir(), "flash-current.img")
+        running = supervisor is not None and supervisor.is_running()
+        if running:
+            # Takes the emulator's own write-back with it, so an edit builds on what
+            # the firmware actually has rather than on the launch-time file.
+            supervisor.power_off()
+            # Wait for the process to actually go, not just for the request to return:
+            # it holds the image open while it exits, and starting the next instance
+            # against a file another process still has open fails on Windows -- which
+            # showed up as a slot write that left the emulator off.
+            for _ in range(40):
+                if not supervisor.is_running():
+                    break
+                time.sleep(0.25)
+        if os.path.abspath(work) != os.path.abspath(flash.path):
+            shutil.copyfile(flash.path, work)
+            flash.path = work
+        result = edit(work)
+        if running:
+            supervisor.power_on()
+        return result
+
+    @app.get("/api/slots")
+    def api_slots():
+        """The firmware slots in the flash image the emulator is using."""
+        if flash is None:
+            return jsonify(error="this server was started without flash control"), 409
+        try:
+            return jsonify(slots_json(flash.path))
+        except Exception as exc:
+            return jsonify(error=str(exc)), 500
+
+    @app.post("/api/slots/<int:slot>")
+    def api_slot_write(slot):
+        """Write an uploaded image into a slot (0 is the backup of Main)."""
+        if not 0 <= slot < SLOT_COUNT:
+            return jsonify(error="slot %d is out of range (0..%d)"
+                           % (slot, SLOT_COUNT - 1)), 400
+        data = request.get_data(cache=False, as_text=False)
+        if not data:
+            return jsonify(error="no image in the request body"), 400
+        if len(data) > MAX_UPLOAD_BYTES:
+            return jsonify(error="%d bytes is too large" % len(data)), 413
+        name = os.path.basename((request.args.get("name")
+                                 or request.headers.get("X-Filename")
+                                 or "firmware.bin").replace("\\", "/"))
+        version = request.args.get("version", "")
+        try:
+            row = _edit_flash(lambda p: write_slot_file(p, slot, data, name, version))
+        except Exception as exc:
+            log.add("slots", "slot %d write failed: %s" % (slot, exc), ip=client_ip())
+            return jsonify(error=str(exc)), 400
+        log.add("slots", "slot %d <- %s (%d bytes, crc %s)"
+                % (slot, name, len(data), "ok" if row.get("crc_ok") else "MISMATCH"),
+                ip=client_ip())
+        return jsonify(slot=row)
+
+    @app.post("/api/slots/<int:slot>/erase")
+    def api_slot_erase(slot):
+        """Erase a slot, as the firmware does for its own 0x0722 command."""
+        if not 0 <= slot < SLOT_COUNT:
+            return jsonify(error="slot %d is out of range (0..%d)"
+                           % (slot, SLOT_COUNT - 1)), 400
+        try:
+            row = _edit_flash(lambda p: erase_slot_file(p, slot))
+        except Exception as exc:
+            log.add("slots", "slot %d erase failed: %s" % (slot, exc), ip=client_ip())
+            return jsonify(error=str(exc)), 400
+        log.add("slots", "slot %d erased" % slot, ip=client_ip())
+        return jsonify(slot=row)
+
+    @app.post("/api/flash")
+    def api_flash_upload():
+        """Use an uploaded image as the external flash, slots and all."""
+        if flash is None:
+            return jsonify(error="this server was started without flash control"), 409
+        name = os.path.basename((request.args.get("name")
+                                 or request.headers.get("X-Filename")
+                                 or "flash.img").replace("\\", "/"))
+        data = request.get_data(cache=False, as_text=False)
+        if not data:
+            return jsonify(error="no flash image in the request body"), 400
+        if len(data) > MAX_UPLOAD_BYTES:
+            return jsonify(error="%d bytes is too large" % len(data)), 413
+        running = supervisor is not None and supervisor.is_running()
+        if running:
+            supervisor.power_off()
+        directory = upload_dir()
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        flash.path = path
+        log.add("slots", "flash image <- %s (%d bytes)" % (name, len(data)),
+                ip=client_ip())
+        if running:
+            supervisor.power_on()
+        return jsonify(slots_json(path))
 
     @app.get("/api/logs")
     def api_logs():
@@ -232,6 +470,17 @@ def create_app(client, frame_addr: int, status_addr: int, scale: int = 4,
 
         # Attribute the action here: the supervisor has no request context, and on
         # a shared log "who powered it off" is the useful part.
+        body = request.get_json(silent=True) or {}
+        if boot_key is not None:
+            if action == "on" and body.get("boot_key"):
+                boot_key.name = str(body["boot_key"])[:16]
+                boot_key.hold_ms = int(body.get("hold_ms") or 1500)
+                log.add("power", "asking for %s held from reset" % boot_key.name,
+                        ip=client_ip())
+            else:
+                # A plain On must not inherit the last boot mode.
+                boot_key.clear()
+
         log.add("power", f"{action} requested", ip=client_ip())
 
         try:
@@ -428,6 +677,11 @@ def render_index(scale: int) -> str:
   /* The border lives on .screenwrap so it stays put when the frame is hidden. */
   #screen {{ display:block; image-rendering:pixelated; background:#c8d6b9; }}
   .body {{ display:flex; gap:14px; align-items:flex-start; }}
+  .fwbar {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+           font-size:12px; color:#8b949e; max-width:420px; }}
+  .fwbar input {{ color:#c9d1d9; font-size:12px; max-width:190px; }}
+  .fwbar .hint {{ opacity:.75; }}
+  #fwstate {{ color:#c9d1d9; }}
   .sides {{ display:flex; flex-direction:column; gap:8px; }}
   .pad {{ display:flex; flex-direction:column; gap:8px; }}
   .row {{ display:flex; gap:8px; }}
@@ -459,6 +713,12 @@ def render_index(scale: int) -> str:
   #speaker {{ font-size:14px; opacity:0.25; transition:opacity 0.15s; }}
   #speaker.on {{ opacity:1; }}
   /*
+   * The display controller's own settings. They never appear in the pixels -- that
+   * is the whole reason they need showing: contrast and inversion live in the
+   * panel, so a menu entry that changes them otherwise looks like it did nothing.
+   */
+  #panel {{ font-size:11px; color:#8b949e; margin-left:8px; letter-spacing:0.3px; }}
+  /*
    * Powered off is a dark panel, drawn by the wrapper so the frame itself can be
    * hidden. An earlier attempt put a dark background on the <img> alone, which
    * changed nothing visible: the image kept painting the last frame over it, so
@@ -475,6 +735,18 @@ def render_index(scale: int) -> str:
    * of view and you scroll back to read them. min-height matches height so a
    * nearly empty pane does not jump around as the first lines arrive.
    */
+  #slottable {{ width:100%; border-collapse:collapse; margin:6px 0 0;
+                font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+                color:#8b949e; }}
+  #slottable td {{ padding:3px 6px; border-top:1px solid #2d333b;
+                   white-space:nowrap; }}
+  #slottable td:first-child {{ color:#c9d1d9; width:12em; }}
+  #slottable input[type=file] {{ color:#8b949e; font:inherit; max-width:14em; }}
+  #slottable button {{ font:inherit; color:#c9d1d9; background:#2b3138;
+                       border:1px solid #2d333b; border-radius:4px; padding:1px 8px; }}
+  #slottable button:hover {{ background:#343b44; }}
+  .mini {{ margin-left:1em; }}
+  .mini input {{ margin-left:0.5em; }}
   #logtext {{ height:180px; min-height:180px; overflow-y:auto; margin:6px 0 0;
              padding:8px; background:#0d1117; border:1px solid #2d333b;
              border-radius:6px; white-space:pre-wrap; word-break:break-all;
@@ -485,11 +757,28 @@ def render_index(scale: int) -> str:
 <div class="radio">
   <div class="powerbar">
     <button class="pwr" data-power="on">On</button>
+    <button class="pwr" data-power="on" data-boot="MENU"
+            title="restart and hold MENU from reset, for the boot menu (Shift+M)">Multiboot</button>
     <button class="pwr" data-power="off">Off</button>
     <button class="pwr" data-power="reset">Reset</button>
     <span id="powerstate">-</span>
     <span id="speaker" title="the firmware has enabled the audio amplifier">&#128264;</span>
+    <span id="panel" title="display controller: contrast, inversion, panel on/off"></span>
   </div>
+  <div class="fwbar">
+    <label for="fwfile">Firmware</label>
+    <input type="file" id="fwfile" accept=".bin,.elf">
+    <span id="fwstate">-</span>
+    <span class="hint">or drop a .bin anywhere on the page</span>
+  </div>
+  <div class="fwbar">
+    <label>Firmware slots</label>
+    <span id="flashstate">-</span>
+    <label class="mini">flash image<input type="file" id="flashfile" accept=".img,.bin"></label>
+    <span class="hint">the multi-system slots live in the external flash;
+    write a .bin into one, then press Multiboot</span>
+  </div>
+  <table id="slottable"><tbody></tbody></table>
   <div class="screenwrap" id="screenwrap">
     <img id="screen" src="/stream" alt="radio LCD"
          width="{128 * scale}" height="{64 * scale}">
@@ -621,7 +910,13 @@ document.querySelectorAll('.pwr').forEach(btn => {{
     }}
     document.querySelectorAll('.pwr').forEach(b => b.disabled = true);
     try {{
-      const r = await fetch('/api/power/' + action, {{method: 'POST'}});
+      // A boot mode needs the key held *from reset*, which only the server can do:
+      // the firmware samples the keypad in the first milliseconds after reset.
+      const body = btn.dataset.boot ? {{ boot_key: btn.dataset.boot }} : {{}};
+      const r = await fetch('/api/power/' + action, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(body) }});
       if (!r.ok) {{
         const j = await r.json().catch(() => ({{}}));
         document.getElementById('status').textContent =
@@ -635,12 +930,46 @@ document.querySelectorAll('.pwr').forEach(btn => {{
       // Restart the stream: the old one ends when the emulator goes away.
       const img = document.getElementById('screen');
       img.src = '/stream?t=' + Date.now();
+// The screen is a long-lived multipart stream. If the server is restarted underneath
+// it -- which happens whenever a firmware or slot write restarts the emulator -- the
+// <img> keeps showing the last frame it received, and then nothing on the page appears
+// to work, because the picture never changes. Reconnect, and fall back to fetching
+// single frames if the stream will not come back.
+let streamRetries = 0;
+const screenEl = document.getElementById('screen');
+function connectStream() {{
+  screenEl.src = '/stream?t=' + Date.now();
+}}
+screenEl.addEventListener('error', () => {{
+  streamRetries += 1;
+  if (streamRetries <= 2) {{
+    setTimeout(connectStream, 1000);
+  }} else {{
+    // Single frames: one plain request each, which always recovers.
+    setInterval(() => {{ screenEl.src = '/frame.png?t=' + Date.now(); }}, 250);
+  }}
+}});
+setInterval(() => {{
+  // A stream that is connected but silent (a stopped guest) still counts as up.
+  // Restarting after every power action is already handled above; this only covers
+  // the server having been replaced, which shows up as a request that never lands.
+  if (screenEl.complete && screenEl.naturalWidth === 0) connectStream();
+}}, 5000);
     }}
   }});
 }});
 
 function showSpeaker(on) {{
   document.getElementById('speaker').classList.toggle('on', !!on);
+}}
+
+function showPanel(panel) {{
+  const el = document.getElementById('panel');
+  if (!panel) {{ el.textContent = ''; return; }}
+  const bits = ['CTR ' + panel.contrast];
+  if (panel.invert) bits.push('INV');
+  if (!panel.display) bits.push('PANEL OFF');
+  el.textContent = bits.join(' · ');
 }}
 
 function showPower(powered) {{
@@ -657,12 +986,14 @@ async function poll() {{
     const s = await r.json();
     showPower(!!s.powered);
     showSpeaker(s.speaker);
+    showPanel(s.panel);
     document.getElementById('status').textContent =
       s.powered ? ('guest: ' + (s.status || 'unknown'))
                 : 'powered off -- press On to boot';
   }} catch (err) {{
     showPower(false);
     showSpeaker(false);
+    showPanel(null);
     document.getElementById('status').textContent = 'server unreachable';
   }}
 }}
@@ -710,6 +1041,125 @@ async function pollLogs() {{
 }}
 pollLogs();
 setInterval(pollLogs, 2000);
+
+// Firmware slots. These are the multi-system firmware's own slots in the
+// external flash (App/driver/mb_flash.h): slot 0 is the backup of the running
+// image, 1..4 are the switchable ones. Writing one rewrites the flash image and
+// restarts the emulator, because the image is chosen when it is spawned.
+async function loadSlots() {{
+  const tb = document.querySelector('#slottable tbody');
+  const state = document.getElementById('flashstate');
+  try {{
+    const j = await (await fetch('/api/slots')).json();
+    if (j.error) {{ state.textContent = j.error; return; }}
+    const base = j.name || j.image || 'flash image';
+    state.textContent = base + ' (' + Math.round(j.size / 1024) + ' KiB)';
+    tb.innerHTML = '';
+    for (const s of j.slots) {{
+      const tr = document.createElement('tr');
+      const label = s.empty ? '<i>empty</i>'
+                            : (s.name || '?') + ' ' + (s.fw_version || '');
+      const size = s.empty ? ''
+                 : s.image_size + ' B' + (s.crc_ok ? '' : '  CRC MISMATCH');
+      tr.innerHTML = '<td>slot ' + s.slot +
+        (s.slot === 0 ? ' (Main)' : '') + '</td><td>' + label +
+        '</td><td>' + size + '</td><td></td>';
+      const td = tr.lastElementChild;
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = '.bin';
+      inp.addEventListener('change', async () => {{
+        const f = inp.files[0];
+        if (!f) return;
+        tr.querySelectorAll('input,button').forEach(b => b.disabled = true);
+        const r = await fetch('/api/slots/' + s.slot + '?name=' +
+                              encodeURIComponent(f.name),
+                              {{ method: 'POST', body: f }});
+        const jj = await r.json();
+        if (jj.error) alert('slot ' + s.slot + ': ' + jj.error);
+        await loadSlots(); poll();
+      }});
+      const er = document.createElement('button');
+      er.textContent = 'Erase';
+      er.addEventListener('click', async () => {{
+        if (!confirm('Erase slot ' + s.slot + '?')) return;
+        tr.querySelectorAll('input,button').forEach(b => b.disabled = true);
+        const r = await fetch('/api/slots/' + s.slot + '/erase',
+                              {{ method: 'POST' }});
+        const jj = await r.json();
+        if (jj.error) alert('slot ' + s.slot + ': ' + jj.error);
+        await loadSlots(); poll();
+      }});
+      td.append(inp, er);
+      tb.appendChild(tr);
+    }}
+  }} catch (err) {{ state.textContent = 'slots unavailable: ' + err; }}
+}}
+const flashInput = document.getElementById('flashfile');
+if (flashInput) flashInput.addEventListener('change', async () => {{
+  const f = flashInput.files[0];
+  if (!f) return;
+  if (!confirm('Use ' + f.name + ' as the external flash image? Slots, settings',
+               ' and calibration come from it.')) return;
+  const r = await fetch('/api/flash?name=' + encodeURIComponent(f.name),
+                        {{ method: 'POST', body: f }});
+  const j = await r.json();
+  if (j.error) alert(j.error);
+  loadSlots(); poll();
+}});
+loadSlots();
+setInterval(loadSlots, 15000);
+// Firmware upload. The file *is* the request body, so the server reads the
+// vector table itself and decides the load offset: an application image and a
+// full-flash image need different ones, and the wrong one fails silently.
+const fwstate = document.getElementById('fwstate');
+const fwfile = document.getElementById('fwfile');
+async function loadFirmware(file) {{
+  fwstate.textContent = 'uploading ' + file.name + ' ...';
+  try {{
+    const res = await fetch('/api/firmware?name=' + encodeURIComponent(file.name), {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/octet-stream' }},
+      body: file }});
+    const info = await res.json();
+    if (!res.ok) {{ fwstate.textContent = info.error || 'upload failed'; return; }}
+    fwstate.textContent = fwLabel(info.firmware) +
+      (info.restarted ? ' - rebooting' : ' - press On');
+    poll();
+  }} catch (err) {{
+    fwstate.textContent = 'upload failed: ' + err;
+  }}
+}}
+if (fwfile) fwfile.addEventListener('change', () => {{
+  if (fwfile.files && fwfile.files[0]) loadFirmware(fwfile.files[0]);
+}});
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => {{
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) loadFirmware(f);
+}});
+// Say when a build has no multi-system boot menu: the Multiboot button then does
+// nothing at all, which reads as the emulator being broken rather than the
+// firmware not containing that menu.
+function fwLabel(fw) {{
+  let s = fw.name + ' (' + fw.kind + ')';
+  if (fw.multiboot === false) s += ' - no multi-system menu';
+  return s;
+}}
+async function pollFirmware() {{
+  try {{
+    const r = await fetch('/api/firmware');
+    const info = await r.json();
+    if (info.firmware) {{
+      fwstate.textContent = fwLabel(info.firmware);
+    }} else {{
+      fwstate.textContent = 'none loaded - drop a .bin here';
+    }}
+  }} catch (err) {{ /* the rest of the page works without this */ }}
+}}
+pollFirmware();
+
 </script>
 </body></html>"""
 
@@ -730,7 +1180,9 @@ def main() -> int:
                          "this server did not start that process.")
     ap.add_argument("--qemu", default=os.path.expanduser(
         "~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm"))
-    ap.add_argument("--elf", default=os.path.expanduser(
+    # Named --elf for history; any .bin or .elf works, and its shape is read out
+    # of the file rather than assumed. More can be uploaded from the page.
+    ap.add_argument("--elf", "--firmware", dest="elf", default=os.path.expanduser(
         "~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf"))
     ap.add_argument("--flash", default=os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -739,6 +1191,8 @@ def main() -> int:
     args = ap.parse_args()
 
     from uvk5_qmp import QmpClient
+    from uvk5_image import ImageSlot
+    from uvk5_supervisor import BootKey, FlashSlot
     from uvk5_supervisor import Supervisor, default_launcher, wait_for_socket
 
     def connect():
@@ -749,9 +1203,24 @@ def main() -> int:
     # One buffer shared by the supervisor and the HTTP layer, so power events,
     # QEMU stderr and firmware serial all land in the same place.
     log = LogBuffer()
+
+    # The image the next launch boots. A slot rather than a path so an upload
+    # from the page takes effect at the next power-on without a restart, and so
+    # the load offset is decided by the image itself (see uvk5_image).
+    image = ImageSlot()
+    boot_key = BootKey()
+    flash = FlashSlot(args.flash)
+    try:
+        image.set(os.path.expanduser(args.elf))
+    except ImageError as exc:
+        # Not fatal: the page can load one, and saying so beats refusing to
+        # start because a default path from another machine is missing.
+        log.add("firmware", "no firmware loaded yet: %s" % exc)
+        print("no firmware loaded yet: %s" % exc)
+
     supervisor = Supervisor(
-        launch=default_launcher(args.qemu, args.flash, args.elf, args.qmp,
-                                gdb_port=args.gdb_port),
+        launch=default_launcher(args.qemu, flash, image, boot_key,
+                                qmp_path=args.qmp, gdb_port=args.gdb_port),
         connect=connect, log=log)
 
     if args.attach:
@@ -762,7 +1231,8 @@ def main() -> int:
     # page behaves like walking up to a machine rather than finding it booted.
 
     app = create_app(supervisor.client(), args.frame_addr, args.status_addr,
-                     args.scale, supervisor=supervisor, log=log)
+                     args.scale, supervisor=supervisor, log=log, image=image,
+                     boot_key=boot_key, flash=flash)
     print(f"serving on http://{args.host}:{args.port}/")
     print("attached to a running emulator" if args.attach
           else "emulator is OFF; press On in the browser to boot it")

@@ -27,10 +27,13 @@ import sys
 import tempfile
 import time
 
+import uvk5_socket
+import uvk5_testenv
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-QEMU = os.path.expanduser("~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm")
-ELF = os.path.expanduser("~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf")
+QEMU = uvk5_testenv.qemu()          # env QEMU/UVK5_QEMU, else PATH
+ELF = uvk5_testenv.firmware()       # env ELF/UVK5_FIRMWARE, else assets/firmware
 PRISTINE = os.path.join(ROOT, "assets", "pristine", "flash-pristine.img.gz")
 
 BOOT_SECONDS = 20
@@ -41,10 +44,14 @@ REG_RSSI = 0x67
 
 
 class Qmp:
-    def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(30)
-        self.sock.connect(path)
+    def __init__(self, endpoint):
+        # A socket or an endpoint. QEMU's QMP accepts a single client, so whoever
+        # waited for it to appear hands its connection in rather than connecting a
+        # second time -- which hangs.
+        if hasattr(endpoint, "recv"):
+            self.sock = endpoint
+        else:
+            self.sock = uvk5_socket.connect(endpoint, timeout=30)
         self.buf = b""
         self._read()
         self.cmd("qmp_capabilities")
@@ -76,32 +83,51 @@ class Qmp:
 
 
 def main():
-    for path, what in ((QEMU, "QEMU"), (ELF, "firmware"), (PRISTINE, "pristine image")):
-        if not os.path.exists(path):
-            sys.exit(f"missing {what}: {path}")
+    absent = uvk5_testenv.missing([
+        (QEMU, "QEMU", "set QEMU=/path/to/qemu-system-arm, or put it on PATH"),
+        (ELF, "firmware", "run tools/fetch_firmware.py, or set ELF=/path/to/image"),
+        (PRISTINE, "pristine flash image", "it ships in assets/pristine/"),
+    ])
+    if absent:
+        return uvk5_testenv.skip(absent)
 
     workdir = tempfile.mkdtemp(prefix="uvk5-bk4819-")
     image = os.path.join(workdir, "flash.img")
-    sock_path = os.path.join(workdir, "qmp.sock")
+    sock_path = uvk5_socket.server_endpoint("qmp", directory=workdir)
     with gzip.open(PRISTINE, "rb") as src, open(image, "wb") as dst:
         shutil.copyfileobj(src, dst)
 
+    child_env = dict(os.environ)
+    child_env["UVK5_FLASH_IMAGE"] = image
+    # stderr to a FILE, not a pipe: the model writes the firmware's serial output
+    # there, and a pipe nobody drains fills up, blocks the guest, and then QMP stops
+    # answering -- which reads as "the emulator never started".
+    qemu_log = os.path.join(workdir, "qemu.log")
+    log_fh = open(qemu_log, "w+b")
     proc = subprocess.Popen(
-        [QEMU, "-M", f"uv-k5-v3,flash-image={image}", "-nographic", "-monitor", "none",
-         "-qmp", f"unix:{sock_path},server=on,wait=off", "-kernel", ELF],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        [QEMU, "-M", "uv-k5-v3", "-nographic", "-monitor", "none",
+         "-qmp", sock_path, "-kernel", ELF],
+        stdout=subprocess.DEVNULL, stderr=log_fh, env=child_env)
 
     failures = []
     try:
-        for _ in range(300):
-            if os.path.exists(sock_path):
+        qmp_sock = None
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError("QEMU exited during startup")
+            try:
+                # Connecting is the test: a unix path can be waited for as a file,
+                # a TCP endpoint cannot, and this works for both.
+                qmp_sock = uvk5_socket.connect(sock_path, timeout=2)
                 break
-            time.sleep(0.1)
-        else:
-            raise RuntimeError("QMP socket never appeared")
+            except OSError:
+                time.sleep(0.1)
+        if qmp_sock is None:
+            raise RuntimeError("QMP never accepted a connection at %s" % sock_path)
 
         time.sleep(BOOT_SECONDS)
-        qmp = Qmp(sock_path)
+        qmp = Qmp(qmp_sock)
 
         # 1. Still running means the untimed REG_0C spin terminated.
         status = qmp.cmd("query-status").get("return", {})

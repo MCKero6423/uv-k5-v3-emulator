@@ -17,7 +17,14 @@
  */
 
 #include "qemu/osdep.h"
+/* g_rename(), for the flash write-back: the C library's rename does not replace an
+ * existing file on Windows, and g_rename maps to the POSIX behaviour there. */
+#include <glib/gstdio.h>
 #include "qapi/error.h"
+/* visit_type_uint64(), used by the BK4819 register property getters. Declared
+ * here rather than reached transitively: qom/object.h does not pull it in, and
+ * without it the file does not compile against a stock QEMU 7.2 tree. */
+#include "qapi/visitor.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
@@ -114,6 +121,9 @@ struct PY32RccState {
 #define RCC_CR      0x00
 #define RCC_ICSCR   0x04
 #define RCC_CFGR    0x08
+#define RCC_CFGR_SW_Msk   0x7u     /* SW[2:0]:   system clock switch */
+#define RCC_CFGR_SWS_Msk  0x38u    /* SWS[5:3]:  ... and its status (PY32 packs it
+                                    * three bits up; an STM32 puts it at bit 2) */
 #define RCC_CIER    0x18
 #define RCC_CIFR    0x1c
 
@@ -140,6 +150,15 @@ static uint64_t py32_rcc_read(void *opaque, hwaddr addr, unsigned size)
         if (value & (1u << 16)) value |= (1u << 17); /* HSE  */
         if (value & (1u << 24)) value |= (1u << 25); /* PLL  */
         value |= (1u << 1);                          /* LSI ready */
+    } else if (addr == RCC_CFGR) {
+        /*
+         * Mirror the requested switch into its status field, the same idea as the
+         * ready bits above. This is where the real bootloader stopped: it writes
+         * SW = PLL and spins on "(CFGR & 0x38) == 0x10", and an unmirrored CFGR
+         * reads back zeros forever, so the machine never leaves clock setup.
+         */
+        value = (value & ~RCC_CFGR_SWS_Msk)
+              | ((value & RCC_CFGR_SW_Msk) << 3);
     }
 
     return value;
@@ -710,6 +729,244 @@ static void audio_class_init(ObjectClass *klass, void *data)
     object_class_property_add_bool(klass, "speaker-on", audio_get_path_on, NULL);
     object_class_property_set_description(klass, "speaker-on",
         "whether the firmware has enabled the audio amplifier (PA8)");
+}
+
+/* ------------------------------------------------------------ ST7565 panel */
+
+/*
+ * The display controller, as far as it can honestly be modelled.
+ *
+ * Nothing here draws anything: the firmware keeps the image in gStatusLine and
+ * gFrameBuffer, and the UI reads those straight out of guest RAM. What the panel
+ * *adds* is the handful of settings that live in the controller rather than in the
+ * framebuffer -- and those are exactly the ones a framebuffer-only view cannot show
+ * at all:
+ *
+ *   0xA6 / 0xA7   display inversion   (menu "SetInv")
+ *   0xAE / 0xAF   display on / off    (sleep, power save)
+ *   0x81 <value>  electronic volume   (menu "SetCtr", the contrast)
+ *
+ * Without this, changing either menu entry looks like it did nothing: the bytes go
+ * out on SPI1 and land nowhere. With it, inversion is directly observable -- the
+ * panel really does invert the image -- while contrast is reported as the number it
+ * is, because how dark the glass gets is analogue and cannot be rendered.
+ *
+ * Commands and pixel data share one wire, so the A0 pin says which is which. Board
+ * wiring follows the driver: PIN_CS is GPIOB pin 2, PIN_A0 is GPIOA pin 6
+ * (App/driver/st7565.c).
+ */
+#define TYPE_ST7565 "st7565"
+OBJECT_DECLARE_SIMPLE_TYPE(ST7565State, ST7565)
+
+struct ST7565State {
+    DeviceState parent_obj;
+
+    bool    a0;              /* PA6: 0 = command, 1 = pixel data */
+    bool    selected;        /* PB2, active low */
+    bool    invert;          /* last of 0xA6 / 0xA7 */
+    bool    display_on;      /* last of 0xAE / 0xAF */
+    uint8_t contrast;        /* value following 0x81 */
+    bool    expect_contrast;
+
+    /*
+     * The controller's own display RAM: what the glass is actually being shown.
+     *
+     * This is here because "read gFrameBuffer out of guest RAM" only works for the
+     * firmware whose addresses you happen to know, and the display logic differs
+     * between builds that share an ancestor -- a multi-system release keeps its
+     * image somewhere else entirely. Every one of them still has to push pixels
+     * through this controller, so the panel's view is the one that is always right.
+     *
+     * Addressed as the driver does it: page (0xB0..0xB7) selects the 8-pixel band,
+     * a column split across 0x00..0x0F and 0x10..0x1F, and each data byte lands at
+     * (page, column) and advances the column. The visible window is columns 4..131
+     * -- the driver's column commands carry a +4 offset -- so the low four columns
+     * are that margin and are not stored.
+     */
+    uint8_t gram[8][128];
+    uint8_t page;
+    uint8_t col;
+    bool    seg_reverse;     /* 0xA1: columns mirrored on the glass */
+    bool    com_reverse;     /* 0xC8: rows mirrored */
+};
+
+static void st7565_set_a0(void *opaque, int line, int level)
+{
+    ST7565State *s = opaque;
+
+    s->a0 = !!level;
+}
+
+static void st7565_set_cs(void *opaque, int line, int level)
+{
+    ST7565State *s = opaque;
+
+    s->selected = !level;
+}
+
+static uint8_t st7565_xfer(void *opaque, uint8_t out)
+{
+    ST7565State *s = opaque;
+
+    if (!s->selected) {
+        return 0xff;
+    }
+    if (s->a0) {
+        /* Pixel data: latch it into the panel's own memory, then advance. */
+        if (s->col >= 4 && s->col < 132) {
+            s->gram[s->page & 7][s->col - 4] = out;
+        }
+        s->col = (s->col + 1) & 0x7f;
+        return 0xff;
+    }
+
+    if (s->expect_contrast) {
+        s->contrast = out;
+        s->expect_contrast = false;
+        return 0xff;
+    }
+
+    /* Addressing first: these share the 0x00..0x1f and 0xb0..0xb7 opcode space. */
+    if (out >= 0xb0 && out <= 0xb7) {
+        s->page = out & 7;
+        return 0xff;
+    }
+    if (out <= 0x0f) {
+        s->col = (s->col & 0xf0) | out;
+        return 0xff;
+    }
+    if (out >= 0x10 && out <= 0x1f) {
+        s->col = (s->col & 0x0f) | ((out & 0x0f) << 4);
+        return 0xff;
+    }
+
+    switch (out) {
+    case 0xa6: s->invert = false;     break;
+    case 0xa7: s->invert = true;      break;
+    case 0xa0: s->seg_reverse = false; break;
+    case 0xa1: s->seg_reverse = true;  break;
+    case 0xc0: s->com_reverse = false; break;
+    case 0xc8: s->com_reverse = true;  break;
+    case 0xae: s->display_on = false; break;
+    case 0xaf: s->display_on = true;  break;
+    case 0x81: s->expect_contrast = true; break;
+    case 0xe2:  /* software reset: the controller's registers go back to defaults */
+        s->invert = false;
+        s->display_on = false;
+        s->contrast = 0;
+        s->expect_contrast = false;
+        break;
+    default:
+        break;
+    }
+    return 0xff;
+}
+
+static bool st7565_get_invert(Object *obj, Error **errp)
+{
+    return ST7565(obj)->invert;
+}
+
+static bool st7565_get_display_on(Object *obj, Error **errp)
+{
+    return ST7565(obj)->display_on;
+}
+
+static void st7565_get_contrast(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    uint8_t value = ST7565(obj)->contrast;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static bool st7565_get_seg_reverse(Object *obj, Error **errp)
+{
+    return ST7565(obj)->seg_reverse;
+}
+
+static bool st7565_get_com_reverse(Object *obj, Error **errp)
+{
+    return ST7565(obj)->com_reverse;
+}
+
+static void st7565_reset(DeviceState *dev)
+{
+    ST7565State *s = ST7565(dev);
+
+    s->a0 = false;
+    s->selected = false;
+    s->invert = false;
+    s->display_on = false;
+    s->contrast = 0;
+    s->expect_contrast = false;
+    s->page = 0;
+    s->col = 0;
+    s->seg_reverse = false;
+    s->com_reverse = false;
+    memset(s->gram, 0, sizeof(s->gram));
+}
+
+/*
+ * The panel's display RAM as hex, for the host to render. A string rather than a
+ * memory region on purpose: it keeps emulator bookkeeping out of the guest's
+ * address space, where a stray firmware read would be indistinguishable from
+ * hardware.
+ */
+static void st7565_get_gram(Object *obj, Visitor *v, const char *name,
+                            void *opaque, Error **errp)
+{
+    ST7565State *s = ST7565(obj);
+    g_autofree char *hex = g_malloc(8 * 128 * 2 + 1);
+    char *p = hex;
+
+    for (int page = 0; page < 8; page++) {
+        for (int col = 0; col < 128; col++) {
+            p += sprintf(p, "%02x", s->gram[page][col]);
+        }
+    }
+    char *value = hex;
+
+    visit_type_str(v, name, &value, errp);
+}
+
+static void st7565_init(Object *obj)
+{
+    qdev_init_gpio_in_named(DEVICE(obj), st7565_set_a0, "a0", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), st7565_set_cs, "cs", 1);
+}
+
+static void st7565_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->reset = st7565_reset;
+    dc->desc = "ST7565 LCD controller (panel settings only)";
+
+    /* Read-only: these reflect what the firmware asked the panel for. */
+    object_class_property_add_bool(klass, "invert", st7565_get_invert, NULL);
+    object_class_property_set_description(klass, "invert",
+        "whether the panel is inverting the display (0xA6/0xA7)");
+    object_class_property_add_bool(klass, "display-on", st7565_get_display_on, NULL);
+    object_class_property_set_description(klass, "display-on",
+        "whether the panel is driving the glass (0xAE/0xAF)");
+    object_class_property_add(klass, "contrast", "uint8",
+                              st7565_get_contrast, NULL, NULL, NULL);
+    object_class_property_set_description(klass, "contrast",
+        "electronic volume the firmware set (the value after 0x81)");
+
+    object_class_property_add(klass, "gram", "string",
+                              st7565_get_gram, NULL, NULL, NULL);
+    object_class_property_set_description(klass, "gram",
+        "the controller's display RAM as hex, 8 pages of 128 columns");
+    object_class_property_add_bool(klass, "segment-reverse",
+                                   st7565_get_seg_reverse, NULL);
+    object_class_property_set_description(klass, "segment-reverse",
+        "0xA1: the driver mirrors the columns before they reach the glass");
+    object_class_property_add_bool(klass, "com-reverse",
+                                   st7565_get_com_reverse, NULL);
+    object_class_property_set_description(klass, "com-reverse",
+        "0xC8: the driver mirrors the rows before they reach the glass");
 }
 
 /* ---------------------------------------------------- BK4819 transceiver */
@@ -1297,8 +1554,19 @@ static uint64_t py32_spi_read(void *opaque, hwaddr addr, unsigned size)
     switch (addr) {
     case SPI_CR1: return s->cr1;
     case SPI_CR2: return s->cr2;
-    case SPI_SR:  return s->sr;
+    case SPI_SR:
+        /* Diagnostic probe, off unless UVK5_READ_PROBE names a file: what a polling program
+ * actually sees. Left in place because it is how the hang above was found. */
+        {
+            const char *p = g_getenv("UVK5_SPI_PROBE");
+            if (p) { FILE *f = fopen(p, "a"); if (f) { fprintf(f, "SR %s = %02x\n", s->bus_name ?: "?", s->sr); fclose(f); } }
+        }
+        return s->sr;
     case SPI_DR:
+        {
+            const char *p = g_getenv("UVK5_SPI_PROBE");
+            if (p) { FILE *f = fopen(p, "a"); if (f) { fprintf(f, "DRREAD %s = %02x\n", s->bus_name ?: "?", s->rx); fclose(f); } }
+        }
         s->sr &= ~SPI_SR_RXNE;
         return s->rx;
     default:
@@ -1347,6 +1615,10 @@ static void py32_spi_write(void *opaque, hwaddr addr, uint64_t value, unsigned s
          * The transfer happens here, in zero guest time. Whatever the attached
          * device returns becomes the received byte.
          */
+        {
+            const char *p = g_getenv("UVK5_SPI_PROBE");
+            if (p) { FILE *f = fopen(p, "a"); if (f) { fprintf(f, "DRWRITE %s = %02x\n", s->bus_name ?: "?", (unsigned)(value & 0xff)); fclose(f); } }
+        }
         s->rx = s->xfer ? s->xfer(s->xfer_opaque, value & 0xff) : 0xff;
         s->sr |= SPI_SR_RXNE | SPI_SR_TXE;
         s->sr &= ~SPI_SR_BSY;
@@ -1835,6 +2107,13 @@ struct PY25Q16State {
     char    *image_path;
 
     bool     selected;
+    /* Diagnostic probe (UVK5_FLASH_PROBE): per-transaction log of what the firmware asks
+ * the flash for. */
+    uint8_t  probe_cmd;
+    uint32_t probe_addr;
+    uint32_t probe_len;
+    uint8_t  probe_first[8];
+    bool     probe_active;
     uint8_t  cmd;
     uint32_t addr;
     unsigned phase;      /* bytes consumed since the command byte */
@@ -1852,16 +2131,44 @@ struct PY25Q16State {
      * finished the whole erase-and-program sequence.
      */
     bool     dirty;
+    /*
+     * The byte range changed since the last write-back, so a flush writes those
+     * bytes rather than the whole 2 MB image.
+     */
+    uint32_t dirty_lo, dirty_hi;
     Notifier exit_notifier;
 };
 
 static void py25q16_exit_notify(Notifier *n, void *data);
 
+static void py25q16_mark_dirty(PY25Q16State *s, uint32_t addr, uint32_t len);
+
 static uint8_t py25q16_xfer(void *opaque, uint8_t out)
 {
     PY25Q16State *s = opaque;
 
+    /* Diagnostic probe (UVK5_CALL_PROBE): one line per call, independent of the frame
+ * machinery. */
+    {
+        const char *p = g_getenv("UVK5_CALL_PROBE");
+        if (p) {
+            FILE *f = fopen(p, "a");
+            if (f) { fprintf(f, "call sel=%d cmd=%02x out=%02x phase=%u\n", s->selected, s->cmd, out, s->phase); fclose(f); }
+        }
+    }
+
     if (!s->selected) {
+        /* Diagnostic probe (UVK5_FLASH_PROBE): a byte arriving while deselected means the
+ * chip-select line
+         * this code drives is not the one the model watches. */
+        const char *p = g_getenv("UVK5_FLASH_PROBE");
+        if (p) {
+            FILE *f = fopen(p, "a");
+            if (f) {
+                fprintf(f, "DESELECTED byte=%02x cmd=%02x addr=%06x\n", out, s->cmd, s->addr);
+                fclose(f);
+            }
+        }
         return 0xff;
     }
 
@@ -1869,6 +2176,11 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
         s->cmd = out;
         s->phase = 0;
         s->addr = 0;
+        s->probe_cmd = out;
+        s->probe_addr = 0;
+        s->probe_len = 0;
+        memset(s->probe_first, 0, sizeof(s->probe_first));
+        s->probe_active = true;   /* every frame, whatever the command */
 
         switch (s->cmd) {
         case PY25Q16_CMD_WREN: s->write_enabled = true;  s->cmd = PY25Q16_CMD_NONE; break;
@@ -1884,19 +2196,28 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
     case PY25Q16_CMD_READ:
         if (s->phase <= 3) {
             s->addr = (s->addr << 8) | out;   /* 24-bit address, MSB first */
+            if (s->phase == 3) s->probe_addr = s->addr;
             return 0xff;
         }
+        if (s->probe_active) {
+            if (s->probe_len < sizeof(s->probe_first)) {
+                s->probe_first[s->probe_len] = s->data[s->addr % PY25Q16_SIZE];
+            }
+            s->probe_len++;
+        }
         return s->data[(s->addr++) % PY25Q16_SIZE];
+
 
     case PY25Q16_CMD_PP:
         if (s->phase <= 3) {
             s->addr = (s->addr << 8) | out;
+            if (s->phase == 3) s->probe_addr = s->addr;
             return 0xff;
         }
         if (s->write_enabled) {
             /* NOR can only clear bits without an erase. */
             s->data[s->addr % PY25Q16_SIZE] &= out;
-            s->dirty = true;
+            py25q16_mark_dirty(s, s->addr % PY25Q16_SIZE, 1);
         }
         /*
          * Page program wraps within its 256-byte page: a burst that runs past the
@@ -1922,10 +2243,11 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
     case PY25Q16_CMD_SE:
         if (s->phase <= 3) {
             s->addr = (s->addr << 8) | out;
+            if (s->phase == 3) s->probe_addr = s->addr;
             if (s->phase == 3 && s->write_enabled) {
                 const uint32_t sector = (s->addr / 0x1000) * 0x1000;
                 memset(s->data + (sector % PY25Q16_SIZE), 0xff, 0x1000);
-                s->dirty = true;
+                py25q16_mark_dirty(s, sector % PY25Q16_SIZE, 0x1000);
             }
         }
         return 0xff;
@@ -1945,6 +2267,9 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
 
     default:
         qemu_log_mask(LOG_UNIMP, "py25q16: unhandled command 0x%02x\n", s->cmd);
+        /* Count it too: a firmware using an unmodelled command would otherwise
+         * look exactly like a firmware that never touched the flash. */
+        if (s->probe_active) s->probe_len++;
         return 0xff;
     }
 }
@@ -1959,13 +2284,64 @@ static uint8_t py25q16_xfer(void *opaque, uint8_t out)
  * Via a temporary file and rename so an interrupted flush cannot leave a truncated
  * image behind -- the file is the only copy of the radio's settings, and losing it
  * to a half-finished write would be worse than not persisting at all.
+ *
+ * Only the bytes that changed, not the whole image: it used to write all 2 MB per
+ * chip-select release, which is ruinous when something programs in small chunks.
+ * The multi-system host interface writes a slot 200 bytes at a time (App/app/uart.c,
+ * 0x0724), so one 114 KB firmware became ~600 full rewrites -- on the vCPU thread,
+ * where the guest and every host tool talking to it wait for each one. Measured: the
+ * slot writer's own reads started timing out mid-transfer because of it.
+ *
+ * Writing the changed range in place is also the more faithful model. A whole-file
+ * temp-and-rename makes an interrupted write atomic, which real NOR is not: yank power
+ * mid-program and the sector is half-written. What must not happen is a *truncated*
+ * file, and an in-place range write cannot truncate anything.
  */
+static void py25q16_mark_dirty(PY25Q16State *s, uint32_t addr, uint32_t len)
+{
+    if (addr >= PY25Q16_SIZE) {
+        addr %= PY25Q16_SIZE;
+    }
+    if (len > PY25Q16_SIZE) {
+        len = PY25Q16_SIZE;
+    }
+    if (addr + len > PY25Q16_SIZE) {
+        len = PY25Q16_SIZE - addr;
+    }
+    if (!s->dirty || addr < s->dirty_lo) {
+        s->dirty_lo = addr;
+    }
+    if (!s->dirty || addr + len > s->dirty_hi) {
+        s->dirty_hi = addr + len;
+    }
+    s->dirty = true;
+}
+
 static void py25q16_flush(PY25Q16State *s)
 {
     char *tmp_path;
     FILE *fh;
 
     if (!s->dirty || !s->image_path || !*s->image_path) {
+        return;
+    }
+
+    /* In place, which is enough: only the programmed range is touched. */
+    fh = fopen(s->image_path, "r+b");
+    if (fh) {
+        const uint32_t len = s->dirty_hi - s->dirty_lo;
+        bool wrote = fseek(fh, (long)s->dirty_lo, SEEK_SET) == 0 &&
+                     fwrite(s->data + s->dirty_lo, 1, len, fh) == len;
+        if (fclose(fh) != 0) {
+            wrote = false;
+        }
+        if (wrote) {
+            s->dirty = false;
+            s->dirty_lo = s->dirty_hi = 0;
+            return;
+        }
+        warn_report("py25q16: short write to %s, keeping the image as it is",
+                    s->image_path);
         return;
     }
 
@@ -1985,7 +2361,13 @@ static void py25q16_flush(PY25Q16State *s)
         return;
     }
     fclose(fh);
-    if (rename(tmp_path, s->image_path) != 0) {
+    /*
+     * g_rename, not rename: on Windows the C library's rename does not replace an
+     * existing file, so every write-back failed with "cannot replace" while the
+     * settings stayed in RAM. GLib's maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING,
+     * which is the POSIX behaviour the temp-file-then-rename dance depends on.
+     */
+    if (g_rename(tmp_path, s->image_path) != 0) {
         warn_report("py25q16: cannot replace %s", s->image_path);
         unlink(tmp_path);
     } else {
@@ -1999,6 +2381,43 @@ static void py25q16_set_cs(void *opaque, int line, int level)
 {
     PY25Q16State *s = opaque;
     const bool selected = !level;
+    {
+        const char *p = g_getenv("UVK5_CS_PROBE");
+        if (p) { FILE *f = fopen(p, "a"); if (f) { fprintf(f, "CS level=%d selected=%d\n", level, selected); fclose(f); } }
+    }
+
+    /* Diagnostic probe (UVK5_FLASH_PROBE): one line per chip-select frame, so a 128 KiB
+     * streaming read is one line rather than 131072 of them. */
+    if (s->selected && !selected && s->probe_active) {
+        const char *probe_path = g_getenv("UVK5_FLASH_PROBE");
+        FILE *probe = probe_path ? fopen(probe_path, "a") : NULL;
+        if (probe) {
+            fprintf(probe, "FLASH %02x addr=%06x len=%u first=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                s->probe_cmd, s->probe_addr, s->probe_len,
+                s->probe_first[0], s->probe_first[1], s->probe_first[2],
+                    s->probe_first[3], s->probe_first[4], s->probe_first[5],
+                    s->probe_first[6], s->probe_first[7]);
+            fclose(probe);
+        }
+        s->probe_active = false;
+    }
+
+    /*
+     * A chip-select edge ends the command in progress: the falling edge starts a
+     * fresh one, the rising edge finishes the current. Real NOR latches its opcode
+     * from the first clocks after CS goes low, so both edges matter.
+     *
+     * Only the rising edge used to reset this, which was invisible while every
+     * caller held CS for a whole transaction and then let go. The multiboot code
+     * is different: it pulses CS per operation, so the model sat inside the first
+     * read it ever saw (cmd=03, phase climbing) and interpreted a later WREN and
+     * page-program as more read data -- which is why the marker write disappeared
+     * without a trace.
+     */
+    if (!s->selected && selected) {
+        s->cmd = PY25Q16_CMD_NONE;
+        s->phase = 0;
+    }
 
     if (s->selected && !selected) {
         /* Deselect ends the command. */
@@ -2046,7 +2465,13 @@ static void py25q16_realize(DeviceState *dev, Error **errp)
 
 static void py25q16_exit_notify(Notifier *n, void *data)
 {
-    py25q16_flush(container_of(n, PY25Q16State, exit_notifier));
+    PY25Q16State *s = container_of(n, PY25Q16State, exit_notifier);
+    if (s->dirty) {
+        /* Everything, on the way out: the range is only an optimisation. */
+        s->dirty_lo = 0;
+        s->dirty_hi = PY25Q16_SIZE;
+    }
+    py25q16_flush(s);
 }
 
 static Property py25q16_properties[] = {
@@ -2377,6 +2802,24 @@ struct PY32StubState {
     CharBackend  chr;
     uint8_t      rx_fifo[256];
     unsigned     rx_head, rx_tail;
+
+    /*
+     * FLASH controller state, for the stub named "flash-ctl".
+     *
+     * The register file is from py32f071xB.h: ACR 0x00, KEYR 0x04, OPTKEYR 0x08,
+     * SR 0x0C, CR 0x10, AR 0x14. Only what the firmware drives is modelled: KEYR
+     * unlock, PG, PER/MER plus STRT, and an SR that reports EOP and never BSY.
+     *
+     * It has to actually program: the multi-system restore writes the slot image
+     * here, and a controller that only echoes its registers leaves the firmware
+     * believing it reflashed while the old image keeps running -- which is
+     * exactly what it did before this existed.
+     */
+    MemoryRegion *int_flash;
+    uint32_t      flash_cr;
+    uint32_t      flash_ar;
+    uint32_t      flash_sr;
+    bool          flash_key1;
 };
 
 /* USART_SR flags, from the vendor header. */
@@ -2421,11 +2864,121 @@ static void py32_stub_receive(void *opaque, const uint8_t *buf, int size)
     }
 }
 
+#define PY32_FLASH_CR_PG    (1u << 0)
+#define PY32_FLASH_CR_PER   (1u << 1)
+#define PY32_FLASH_CR_MER   (1u << 2)
+#define PY32_FLASH_CR_STRT  (1u << 6)
+#define PY32_FLASH_CR_LOCK  (1u << 7)
+#define PY32_FLASH_SR_EOP   (1u << 0)
+#define PY32_FLASH_KEY1     0x45670123u
+#define PY32_FLASH_KEY2     0xCDEF89ABu
+#define PY32_FLASH_PAGE     0x100u
+
+/* True for the stub that stands in for the FLASH controller. */
+static bool py32_stub_is_flash_ctl(PY32StubState *s)
+{
+    return s->stub_name != NULL && strcmp(s->stub_name, "flash-ctl") == 0;
+}
+
+static void py32_flash_ctl_erase(PY32StubState *s, bool whole)
+{
+    if (s->int_flash == NULL) {
+        return;
+    }
+    uint8_t *base = memory_region_get_ram_ptr(s->int_flash);
+    if (base == NULL) {
+        return;
+    }
+    if (whole) {
+        memset(base, 0xff, PY32_FLASH_SIZE);
+    } else {
+        const uint32_t off = s->flash_ar - PY32_FLASH_BASE;
+        if (off + PY32_FLASH_PAGE <= PY32_FLASH_SIZE) {
+            memset(base + off, 0xff, PY32_FLASH_PAGE);
+        }
+    }
+    s->flash_sr |= PY32_FLASH_SR_EOP;
+}
+
+static bool py32_flash_ctl_write(PY32StubState *s, hwaddr addr, uint64_t value)
+{
+    switch (addr) {
+    case 0x04:   /* KEYR */
+        if ((uint32_t)value == PY32_FLASH_KEY1) {
+            s->flash_key1 = true;
+        } else if ((uint32_t)value == PY32_FLASH_KEY2 && s->flash_key1) {
+            s->flash_cr &= ~PY32_FLASH_CR_LOCK;
+            s->flash_key1 = false;
+        }
+        return true;
+    case 0x0c:   /* SR: EOP is write-1-to-clear */
+        s->flash_sr &= ~(uint32_t)value;
+        return true;
+    case 0x10:   /* CR */
+        s->flash_cr = (uint32_t)value;
+        if (!(s->flash_cr & PY32_FLASH_CR_LOCK) && (s->flash_cr & PY32_FLASH_CR_STRT)) {
+            if (s->flash_cr & PY32_FLASH_CR_MER) {
+                py32_flash_ctl_erase(s, true);
+            } else if (s->flash_cr & PY32_FLASH_CR_PER) {
+                py32_flash_ctl_erase(s, false);
+            }
+            s->flash_cr &= ~PY32_FLASH_CR_STRT;   /* self-clearing */
+        }
+        return true;
+    case 0x14:   /* AR */
+        s->flash_ar = (uint32_t)value;
+        return true;
+    case 0x00:   /* ACR */
+    case 0x08:   /* OPTKEYR */
+        /*
+         * Stored, not swallowed. The bootloader's first loop is
+         *
+         *     ldr r2, [r1]      ; r1 = 0x40022000, the flash controller
+         *     lsls r2, r2, #30
+         *     lsrs r2, r2, #30  ; r2 = ACR & 3, the LATENCY field
+         *     cmp  r2, #1       ; waiting for one wait state
+         *     bne  -6
+         *
+         * so a write of 1 that is dropped here leaves ACR reading 0 forever and the
+         * bootloader spins before it ever configures its UART. That is exactly what it
+         * did: power-on produced no serial at all and the PC sampled 0x08000f38, the
+         * load inside that loop, on every sample. Returning false lets the generic
+         * path keep the value, which is what the register does.
+         */
+        return false;
+    default:
+        return false;
+    }
+}
+
 static uint64_t py32_stub_read(void *opaque, hwaddr addr, unsigned size)
 {
     PY32StubState *s = opaque;
     const unsigned idx = addr >> 2;
     uint32_t value = idx < ARRAY_SIZE(s->regs) ? s->regs[idx] : 0;
+
+    if (py32_stub_is_flash_ctl(s)) {
+        switch (addr) {
+        case 0x0c: value = s->flash_sr; break;
+        case 0x10: value = s->flash_cr; break;
+        case 0x14: value = s->flash_ar; break;
+        default: break;
+        }
+    }
+    /* Diagnostic probe (UVK5_USART_PROBE): reads matter as much as writes here. A program
+ * that
+     * never touches the USART is not waiting for a frame, and one that polls it is
+     * telling us the bytes are not arriving. */
+    if (s->stub_name && !strcmp(s->stub_name, "usart1")) {
+        const char *probe_path = g_getenv("UVK5_USART_PROBE");
+        if (probe_path) {
+            FILE *probe = fopen(probe_path, "a");
+            if (probe) {
+                fprintf(probe, "USART1 read  0x%02x -> 0x%08x\n", (unsigned)addr, value);
+                fclose(probe);
+            }
+        }
+    }
 
     /*
      * USART1 SR must report the transmitter as ready, or the firmware discards
@@ -2504,6 +3057,29 @@ static void py32_stub_write(void *opaque, hwaddr addr, uint64_t value, unsigned 
     PY32StubState *s = opaque;
     const unsigned idx = addr >> 2;
 
+    /*
+     * Diagnostic probe (UVK5_USART_PROBE): what the bootloader asks the USART
+     * for, including the interrupt enables: a program that receives in an ISR cannot
+     * see anything from a stub that never raises one, and the application side would
+     * never reveal that because its driver polls DMA instead.
+     */
+    if (s->stub_name && !strcmp(s->stub_name, "usart1")) {
+        const char *probe_path = g_getenv("UVK5_USART_PROBE");
+        if (probe_path) {
+            FILE *probe = fopen(probe_path, "a");
+            if (probe) {
+                fprintf(probe, "USART1 write 0x%02x = 0x%08x%s\n",
+                        (unsigned)addr, (unsigned)value,
+                        (addr == 0x0c && (value & 0x20)) ? "   RXNEIE" : "");
+                fclose(probe);
+            }
+        }
+    }
+
+    if (py32_stub_is_flash_ctl(s) && py32_flash_ctl_write(s, addr, value)) {
+        return;
+    }
+
     if (idx < ARRAY_SIZE(s->regs)) {
         s->regs[idx] = value;
     }
@@ -2576,7 +3152,7 @@ static void py32_stub_class_init(ObjectClass *klass, void *data)
 OBJECT_DECLARE_SIMPLE_TYPE(PY32F071State, PY32F071_SOC)
 
 #define PY32_NUM_GPIO 4
-#define PY32_NUM_STUB 25
+#define PY32_NUM_STUB 28
 
 struct PY32F071State {
     DeviceState parent_obj;
@@ -2596,6 +3172,12 @@ struct PY32F071State {
     MemoryRegion flash_alias;
     MemoryRegion sram;
     MemoryRegion *board_memory;
+    /*
+     * Where the application image begins in flash, and therefore what address 0
+     * aliases. 0 means "the image *is* the whole flash", which is how a bootloader
+     * or multi-system release ships -- see the machine's app-offset property.
+     */
+    uint32_t app_offset;
     MemoryRegion container;
     /* An address space over `container`, so DMA sees the same map as the CPU. */
     AddressSpace dma_as;
@@ -2628,7 +3210,44 @@ static const struct { const char *name; hwaddr base; uint32_t size; } py32_stubs
     { "usart4",    PY32_USART4_BASE,  0x400 },
     { "dbgmcu",    PY32_DBGMCU_BASE,  0x400 },
     { "lcd-ctl",   PY32_LCD_BASE,     0x400 },
+    /*
+     * 0x30000000 is not in the vendor CMSIS header and not in this SoC's documented
+     * map, but the multi-system release ("原厂7.02.07转换成三方刷机模式") opens with a
+     * read-modify-write there -- clear bits 3..5, then bit 1 -- and hard-faults
+     * without an answer. Real hardware evidently answers it, so a stub is the
+     * faithful minimum. Found by reading the exception frame: the stacked PC was
+     * 0x0800f7aa, an "ldr r0, [r4]" with r4 = 0x30000000.
+     */
+    { "unk-30000000", 0x30000000, 0x1000 },
+    /*
+     * The whole APB/AHB peripheral space, at the lowest priority, so a register the
+     * table above does not name still answers instead of aborting. This is not
+     * laziness: a real PY32F071 has more peripherals than the header lists blocks
+     * for here, and the firmware is the reference. The multi-system release died on
+     * "Data Abort at 0x40007400" -- DAC1_BASE, defined in the vendor header but with
+     * no model and no stub -- and a missing register is indistinguishable from
+     * broken hardware once it aborts. Accessing one logs (LOG_UNIMP), which is how
+     * the next thing worth modelling gets identified.
+     */
+    { "catchall",  0x40000000, 0x80000 },
+    /*
+     * The factory information block: unique device ID at 0x1FFF3000, option bytes at
+     * 0x1FFF3100, flash size at 0x1FFF31FC (py32f071xB.h). The multi-system release
+     * reads the UID early -- "Data Abort at 0x1fff3000" -- and on real silicon it
+     * answers. There is no way to invent a real serial number, and nothing here
+     * should depend on one, so zeros it is.
+     */
+    { "info-block", 0x1FFF3000, 0x400 },
 };
+
+/*
+ * The array of stub devices is sized by PY32_NUM_STUB, which is declared before the
+ * table can be counted. Adding an entry without bumping the constant used to be
+ * silent: the extra device was never realized and the address stayed unmapped, so a
+ * read there still hard-faulted and the only clue was that nothing changed. Four
+ * words of build-time check instead.
+ */
+QEMU_BUILD_BUG_ON(ARRAY_SIZE(py32_stubs) != PY32_NUM_STUB);
 
 static const hwaddr py32_gpio_bases[PY32_NUM_GPIO] = {
     PY32_GPIOA_BASE, PY32_GPIOB_BASE, PY32_GPIOC_BASE, PY32_GPIOF_BASE,
@@ -2670,7 +3289,12 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
 
     memory_region_init(&s->container, obj, "py32f071-container", 0x60000000);
 
-    memory_region_init_rom(&s->flash, obj, "py32f071.flash", PY32_FLASH_SIZE, errp);
+        /*
+     * RAM, not ROM: the multi-system release reprograms the application region
+     * through the FLASH controller (MB_RestoreSlot), so the region has to be
+     * writable. The loader still fills it with the kernel image.
+     */
+    memory_region_init_ram(&s->flash, obj, "py32f071.flash", PY32_FLASH_SIZE, errp);
     if (*errp) {
         return;
     }
@@ -2798,6 +3422,16 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->stub[i]), errp)) {
             return;
         }
+        if (!strcmp(py32_stubs[i].name, "flash-ctl")) {
+            /* The controller programs the array the CPU executes from. */
+            s->stub[i].int_flash = &s->flash;
+        }
+        if (!strcmp(py32_stubs[i].name, "catchall")) {
+            /* Priority -1: every named device above still wins its own window. */
+            memory_region_add_subregion_overlap(&s->container, py32_stubs[i].base,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->stub[i]), 0), -1);
+            continue;
+        }
         memory_region_add_subregion(&s->container, py32_stubs[i].base,
                                     sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->stub[i]), 0));
 
@@ -2821,14 +3455,15 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
      * application's vector table rather than the bootloader's.
      */
     memory_region_init_alias(&s->flash_alias, obj, "py32f071.flash.alias",
-                             &s->flash, PY32_APP_OFFSET,
-                             PY32_FLASH_SIZE - PY32_APP_OFFSET);
+                             &s->flash, s->app_offset,
+                             PY32_FLASH_SIZE - s->app_offset);
     memory_region_add_subregion(&s->container, 0, &s->flash_alias);
 }
 
 static Property py32f071_soc_properties[] = {
     DEFINE_PROP_LINK("memory", PY32F071State, board_memory, TYPE_MEMORY_REGION,
                      MemoryRegion *),
+    DEFINE_PROP_UINT32("app-offset", PY32F071State, app_offset, PY32_APP_OFFSET),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -2849,12 +3484,132 @@ struct UVK5MachineState {
     UVK5KeypadState keypad;
     BK4819State     bk4819;
     UVK5AudioState  audio;
+    ST7565State     panel;
     Clock *sysclk;
     char  *flash_image;
+    uint32_t app_offset;
+    bool app_offset_set;   /* an explicit app-offset wins over the sniffed one */
+
+    /*
+     * A key held from reset, so the firmware's boot-time key sampling sees it.
+     * Without this, entering a boot mode means pausing the VM, setting the keypad
+     * over QMP and continuing -- fine for a script, unusable from the page.
+     * The hold is measured in guest time and released by a timer, which is what
+     * the firmware itself measures.
+     */
+    char      *boot_key;
+    uint32_t   boot_key_hold_ms;
+    QEMUTimer *boot_key_timer;
+    QEMUTimer *pc_probe_timer;
+    bool       boot_key_ptt;
 };
 
 #define TYPE_UVK5_MACHINE MACHINE_TYPE_NAME("uv-k5-v3")
 OBJECT_DECLARE_SIMPLE_TYPE(UVK5MachineState, UVK5_MACHINE)
+
+/*
+ * A release .bin carries no headers, so which shape it is has to be read out of the
+ * image: the first two words are the initial SP and the reset handler, and where the
+ * handler sits decides the rest. A bootloader's entry point lives inside the
+ * bootloader region, ahead of the application; anything else is an application
+ * linked for PY32_APP_OFFSET.
+ *
+ * This is done here rather than by the caller because getting it wrong is silent: the
+ * image lands 0x2800 bytes off and the first fetch reads whatever data is there. An
+ * .elf needs none of it -- it carries its own program headers.
+ */
+static uint32_t uvk5_sniff_app_offset(const char *path)
+{
+    g_autofree char *data = NULL;
+    gsize len = 0;
+    uint32_t sp, reset;
+
+    if (path == NULL || !g_file_get_contents(path, &data, &len, NULL) || len < 8) {
+        return PY32_APP_OFFSET;
+    }
+    if (memcmp(data, "\x7f" "ELF", 4) == 0) {
+        return PY32_APP_OFFSET;
+    }
+    sp = ldl_le_p(data);
+    reset = ldl_le_p(data + 4);
+    if (sp <= PY32_SRAM_BASE || sp > PY32_SRAM_BASE + PY32_SRAM_SIZE) {
+        return PY32_APP_OFFSET;
+    }
+    if (reset >= PY32_FLASH_BASE && reset < PY32_FLASH_BASE + PY32_APP_OFFSET) {
+        return 0;   /* bootloader entry: a full-flash image */
+    }
+    return PY32_APP_OFFSET;
+}
+
+/*
+ * Diagnostic probe (UVK5_PC_PROBE): samples the guest's PC into a file so a hang
+ * can be located without a debugger (a gdb attach stops the guest, which is the
+ * one thing that must not happen while working out where it stopped).
+ */
+static void uvk5_pc_probe_tick(void *opaque)
+{
+    UVK5MachineState *s = opaque;
+    const char *path = g_getenv("UVK5_PC_PROBE");
+    if (path) {
+        FILE *f = fopen(path, "a");
+        if (f) {
+            fprintf(f, "PC %08x\n", (unsigned)s->soc.armv7m.cpu->env.regs[15]);
+            fclose(f);
+        }
+    }
+    timer_mod(s->pc_probe_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+}
+
+static void uvk5_boot_key_release(void *opaque)
+{
+    UVK5MachineState *s = opaque;
+    Error *err = NULL;
+
+    object_property_set_str(OBJECT(&s->keypad), "press", "", &err);
+    object_property_set_bool(OBJECT(&s->keypad), "ptt", false, &err);
+    error_free(err);
+}
+
+/*
+ * Hold a key across reset. The property wins; the environment is the fallback,
+ * for the same reason the flash image uses one (a -machine property list is not
+ * always deliverable through the web UI's launcher).
+ */
+static void uvk5_arm_boot_key(UVK5MachineState *s)
+{
+    const char *key = s->boot_key ?: g_getenv("UVK5_BOOT_KEY");
+    uint32_t hold_ms = s->boot_key_hold_ms;
+    Error *err = NULL;
+
+    if (hold_ms == 0) {
+        const char *env_ms = g_getenv("UVK5_BOOT_KEY_MS");
+                /*
+         * 8 s by default, not 1.5 s: the multi-system boot path can spend ~20 s of
+         * guest time adopting the running firmware into slot 0 before the
+         * application samples the keypad at all, so a short hold is released long
+         * before anything looks at it. The selector waits for the release, so a
+         * long hold only delays the menu; a short one loses the boot mode entirely.
+         */
+        hold_ms = env_ms ? (uint32_t)g_ascii_strtoull(env_ms, NULL, 0) : 8000;
+    }
+    if (key == NULL || *key == '\0') {
+        return;
+    }
+    s->boot_key_ptt = (g_ascii_strcasecmp(key, "PTT") == 0);
+    if (s->boot_key_ptt) {
+        object_property_set_bool(OBJECT(&s->keypad), "ptt", true, &err);
+    } else {
+        object_property_set_str(OBJECT(&s->keypad), "press", key, &err);
+    }
+    if (err) {
+        warn_report("boot-key %s: %s", key, error_get_pretty(err));
+        error_free(err);
+        return;
+    }
+    s->boot_key_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, uvk5_boot_key_release, s);
+    timer_mod(s->boot_key_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + hold_ms);
+    info_report("boot-key: holding %s for %u ms of guest time", key, hold_ms);
+}
 
 static void uvk5_machine_init(MachineState *machine)
 {
@@ -2863,6 +3618,10 @@ static void uvk5_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "soc", &s->soc, TYPE_PY32F071_SOC);
     object_property_set_link(OBJECT(&s->soc), "memory",
                              OBJECT(get_system_memory()), &error_fatal);
+    if (!s->app_offset_set) {
+        s->app_offset = uvk5_sniff_app_offset(machine->kernel_filename);
+    }
+    qdev_prop_set_uint32(DEVICE(&s->soc), "app-offset", s->app_offset);
 
     /*
      * SysTick pacing, deliberately not the real 48 MHz.
@@ -2896,7 +3655,14 @@ static void uvk5_machine_init(MachineState *machine)
          * Without one the flash reads as erased, which the firmware treats as a
          * factory-fresh radio: it boots, but with no calibration data.
          */
-        const char *path = s->flash_image;
+        /*
+     * The -machine property, or UVK5_FLASH_IMAGE as a fallback. The fallback exists
+     * because a -machine property list is not always deliverable: through the web UI's
+     * launcher QEMU rejected the whole machine string with "unsupported machine type"
+     * while the identical argv started fine when run by hand, and the environment is
+     * one channel that demonstrably arrives intact.
+     */
+    const char *path = s->flash_image ?: g_getenv("UVK5_FLASH_IMAGE");
         if (!path || !*path) {
             path = machine->firmware;
         }
@@ -2948,9 +3714,30 @@ static void uvk5_machine_init(MachineState *machine)
      * held at once, which the firmware discards as noise.
      */
     keypad_update_rows(&s->keypad);
+    uvk5_arm_boot_key(s);
+    if (g_getenv("UVK5_PC_PROBE")) {
+        s->pc_probe_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, uvk5_pc_probe_tick, s);
+        timer_mod(s->pc_probe_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+    }
     qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[0]), "pin-out", 3,
                                 qdev_get_gpio_in_named(DEVICE(&s->flash),
                                                        "cs", 0));
+
+    /*
+     * The display controller on SPI1, with the two control lines the driver uses:
+     * CS on PB2 and A0 on PA6 (App/driver/st7565.c). Only the panel's own settings
+     * are modelled -- they live in the controller, not in the framebuffer, which is
+     * why nothing else in the emulator can see a contrast or inversion change.
+     */
+    object_initialize_child(OBJECT(machine), "panel", &s->panel, TYPE_ST7565);
+    qdev_realize(DEVICE(&s->panel), NULL, &error_fatal);
+    py32_spi_set_xfer(&s->soc.spi[0], st7565_xfer, &s->panel);
+    qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[1]), "pin-out", 2,
+                                qdev_get_gpio_in_named(DEVICE(&s->panel),
+                                                       "cs", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[0]), "pin-out", 6,
+                                qdev_get_gpio_in_named(DEVICE(&s->panel),
+                                                       "a0", 0));
 
     /*
      * BK4819 on its bit-banged three-wire bus: CS is PF9, SCL PB8, SDA PB9.
@@ -2992,12 +3779,22 @@ static void uvk5_machine_init(MachineState *machine)
                                                        "path", 0));
 
     /*
-     * The application lives at PY32_APP_OFFSET, past the bootloader. Passing
-     * that as the load offset means a plain application .elf/.bin boots without
-     * needing a bootloader image.
+     * The application lives at PY32_APP_OFFSET, past the bootloader.
+     *
+     * The raw-binary case is the one that bites. A .bin has no headers, so QEMU
+     * writes it at exactly the address it is handed, *in the CPU's address space*.
+     * Hand it app_offset (0x2800) and it lands at container 0x2800 -- inside the
+     * flash alias, which maps to flash offset 0x5000 -- so the image sits 0x2800
+     * bytes too high and the first fetch reads 0xFF and faults. A raw image belongs
+     * at the flash base plus the offset: PY32_FLASH_BASE + app_offset.
+     *
+     * An .elf carries its own program headers and ignores this base entirely, which
+     * is why wrapping the release .bin in an ELF used to be the workaround
+     * (tools/bin2elf.py). It is not needed for a plain application .bin any more.
      */
     armv7m_load_kernel(ARM_CPU(first_cpu), machine->kernel_filename,
-                       PY32_APP_OFFSET, PY32_FLASH_SIZE - PY32_APP_OFFSET);
+                       PY32_FLASH_BASE + s->app_offset,
+                       PY32_FLASH_SIZE - s->app_offset);
 }
 
 static char *uvk5_get_flash_image(Object *obj, Error **errp)
@@ -3013,14 +3810,87 @@ static void uvk5_set_flash_image(Object *obj, const char *value, Error **errp)
     s->flash_image = g_strdup(value);
 }
 
+static void uvk5_get_app_offset(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    uint32_t value = UVK5_MACHINE(obj)->app_offset;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void uvk5_set_app_offset(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    UVK5MachineState *s = UVK5_MACHINE(obj);
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    s->app_offset = value;
+    s->app_offset_set = true;
+}
+
+static char *uvk5_get_boot_key(Object *obj, Error **errp)
+{
+    return g_strdup(UVK5_MACHINE(obj)->boot_key);
+}
+
+static void uvk5_set_boot_key(Object *obj, const char *value, Error **errp)
+{
+    UVK5MachineState *s = UVK5_MACHINE(obj);
+    g_free(s->boot_key);
+    s->boot_key = g_strdup(value);
+}
+
+static void uvk5_get_boot_key_hold(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint32_t value = UVK5_MACHINE(obj)->boot_key_hold_ms;
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void uvk5_set_boot_key_hold(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    UVK5MachineState *s = UVK5_MACHINE(obj);
+    uint32_t value;
+    if (visit_type_uint32(v, name, &value, errp)) {
+        s->boot_key_hold_ms = value;
+    }
+}
+
 static void uvk5_machine_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
     object_class_property_add_str(oc, "flash-image",
                                   uvk5_get_flash_image, uvk5_set_flash_image);
+    object_class_property_add_str(oc, "boot-key",
+                                  uvk5_get_boot_key, uvk5_set_boot_key);
+    object_class_property_set_description(oc, "boot-key",
+        "key held from reset (e.g. MENU), so boot-time key modes are reachable");
+    object_class_property_add(oc, "boot-key-hold-ms", "uint32",
+                              uvk5_get_boot_key_hold, uvk5_set_boot_key_hold,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "boot-key-hold-ms",
+        "how long to hold it, in guest time (default 1500 ms)");
     object_class_property_set_description(oc, "flash-image",
         "2MB SPI NOR image holding settings and calibration data");
+
+    /*
+     * Firmware releases come in two shapes. An *application* image starts at its
+     * own vector table, linked for 0x08002800, and address 0 has to alias there. A
+     * *full* image -- a bootloader, or the multi-system release -- starts at
+     * 0x08000000 and address 0 has to alias the flash base instead. Getting this
+     * wrong is silent: the image loads 0x2800 bytes off and executes whatever data
+     * happens to be there.
+     */
+    object_class_property_add(oc, "app-offset", "uint32",
+                              uvk5_get_app_offset, uvk5_set_app_offset,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "app-offset",
+        "where the loaded image sits in flash; 0 for a full-flash image");
 
     mc->desc = "Quansheng UV-K5 V3 / UV-K1 (PY32F071, Cortex-M0+)";
     mc->init = uvk5_machine_init;
@@ -3077,6 +3947,13 @@ static const TypeInfo py32_types[] = {
         .instance_size = sizeof(BK4819State),
         .instance_init = bk4819_init,
         .class_init = bk4819_class_init,
+    },
+    {
+        .name = TYPE_ST7565,
+        .parent = TYPE_DEVICE,
+        .instance_size = sizeof(ST7565State),
+        .instance_init = st7565_init,
+        .class_init = st7565_class_init,
     },
     {
         .name = TYPE_PY25Q16,

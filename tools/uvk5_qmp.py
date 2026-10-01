@@ -13,19 +13,33 @@ import socket
 import threading
 
 
+def connect(endpoint: str, timeout: float):
+    """Open the QMP connection.
+
+    Accepts everything QEMU accepts: a bare unix path, host:port, or the full forms
+    tcp:host:port[,options] and unix:path -- which is what uvk5_socket.listen() hands
+    back, so the listening and connecting sides cannot drift apart. One parser, in
+    uvk5_socket, because two of them is how the Windows path broke: this one only
+    understood host:port, so a tcp:... endpoint fell through to the unix branch and
+    failed with a missing AF_UNIX.
+    """
+    import uvk5_socket
+
+    return uvk5_socket.connect(endpoint, timeout=timeout)
+
+
 class QmpClient:
     def __init__(self, path: str, timeout: float = 5.0):
         self._lock = threading.Lock()
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.settimeout(timeout)
         try:
-            self._sock.connect(path)
+            self._sock = connect(path, timeout)
         except OSError as exc:
             raise RuntimeError(
                 f"cannot reach the emulator at {path}: {exc}\n"
-                "Start it with tools/run.sh first. Note the QMP socket takes a "
-                "single client, so tools/key.py cannot be connected at the same "
-                "time."
+                "Start it with tools/run.sh first (on Windows pass --qmp "
+                "127.0.0.1:4444 and start QEMU with -qmp tcp:...). Note the QMP "
+                "socket takes a single client, so tools/key.py cannot be "
+                "connected at the same time."
             ) from exc
         self._buf = b""
         self._read_json()                       # greeting

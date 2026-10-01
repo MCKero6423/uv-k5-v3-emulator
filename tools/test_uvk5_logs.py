@@ -72,6 +72,21 @@ class TestLogBuffer(unittest.TestCase):
         log.pump_stream(io.BytesIO(b"\xff\xfe bad\ngood\n"), default_source="qemu")
         self.assertEqual(len(log.entries()), 2)
 
+    def test_pump_stream_summarises_binary_serial(self):
+        """The CPS protocol shares the serial wire with the firmware's own output.
+
+        Decoded as text it filled the pane with control characters and buried the
+        readable line; a mostly-binary line is reported as a size and a hex prefix,
+        and it keeps its "serial" attribution.
+        """
+        log = LogBuffer(capacity=20)
+        log.pump_stream(io.BytesIO(b"SERIAL hello\nSERIAL \x02\x10\xff\xfe\x03\n"),
+                        default_source="qemu")
+        got = [(e["source"], e["text"]) for e in log.entries()]
+        self.assertEqual(got[0], ("serial", "hello"))
+        self.assertEqual(got[1][0], "serial")
+        self.assertTrue(got[1][1].startswith("<binary 5 bytes>"), got[1][1])
+
     def test_add_is_thread_safe(self):
         log = LogBuffer(capacity=500)
 

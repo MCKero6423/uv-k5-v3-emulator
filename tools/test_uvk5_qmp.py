@@ -7,14 +7,18 @@ import tempfile
 import threading
 import unittest
 
+import uvk5_socket
+
 from uvk5_qmp import QmpClient
 
 
-def fake_server(path, script):
-    """Minimal QMP server: greets, then replies to each command from `script`."""
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(1)
+def fake_server(script):
+    """Minimal QMP server: greets, then replies to each command from script.
+
+    Returns (endpoint, server). The listener comes from uvk5_socket because a
+    Windows QEMU cannot create a unix socket, and this file used to insist on one.
+    """
+    srv, endpoint = uvk5_socket.listen("qmp")
 
     def run():
         conn, _ = srv.accept()
@@ -32,22 +36,20 @@ def fake_server(path, script):
         srv.close()
 
     threading.Thread(target=run, daemon=True).start()
-    return srv
+    return endpoint, srv
 
 
 class TestQmpClient(unittest.TestCase):
     def test_negotiates_and_returns_command_result(self):
-        path = os.path.join(tempfile.mkdtemp(), "qmp.sock")
         # reply 1 = qmp_capabilities, reply 2 = our command
-        fake_server(path, [{"return": {}}, {"return": {"status": "running"}}])
+        path, _srv = fake_server([{"return": {}}, {"return": {"status": "running"}}])
 
         client = QmpClient(path)
         self.addCleanup(client.close)
         self.assertEqual(client.command("query-status"), {"status": "running"})
 
     def test_raises_on_qmp_error(self):
-        path = os.path.join(tempfile.mkdtemp(), "qmp.sock")
-        fake_server(path, [{"return": {}},
+        path, _srv = fake_server([{"return": {}},
                            {"error": {"class": "GenericError", "desc": "nope"}}])
         client = QmpClient(path)
         self.addCleanup(client.close)
@@ -62,10 +64,7 @@ class TestQmpClient(unittest.TestCase):
         return, so a client that stopped at the first message would hand back the
         event instead.
         """
-        path = os.path.join(tempfile.mkdtemp(), "qmp.sock")
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(path)
-        srv.listen(1)
+        srv, path = uvk5_socket.listen("qmp")   # (socket, endpoint)
 
         def run():
             conn, _ = srv.accept()

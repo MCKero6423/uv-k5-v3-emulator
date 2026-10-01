@@ -24,7 +24,9 @@ class TestKeys(unittest.TestCase):
         """
         src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            os.pardir, "qemu", "py32f071.c")
-        text = open(src).read()
+        # Explicit UTF-8: the default is the locale codec, and on Windows that is
+        # GBK, which cannot decode this file once it contains any non-ASCII byte.
+        text = open(src, encoding="utf-8").read()
         block = re.search(
             r"keypad_key_names\[[^\]]*\]\s*=\s*\{(.*?)\};", text, re.S)
         self.assertIsNotNone(block, "could not find keypad_key_names in the model")

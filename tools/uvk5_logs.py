@@ -15,6 +15,29 @@ import collections
 import threading
 import time
 
+# Bytes that are safe to show as text. Everything else in a serial line means the
+# wire is carrying binary, not output meant to be read.
+_TEXT_BYTES = frozenset(range(0x20, 0x7f)) | {0x09}
+
+
+def describe_line(raw: bytes) -> str:
+    """A line of serial, or a summary when the bytes are not text.
+
+    Serial carries two very different things over one wire: the firmware's readable
+    output, and the CPS programming protocol, which is binary. Decoding the second
+    as text filled the pane with control characters and buried the first, so a line
+    that is mostly non-printable becomes its size plus a hex prefix instead.
+    """
+    body = raw.rstrip(b"\r\n")
+    if not body:
+        return ""
+    unprintable = sum(1 for b in body if b not in _TEXT_BYTES)
+    if unprintable * 4 <= len(body):
+        return body.decode("utf-8", "replace")
+    head = body[:24].hex(" ")
+    tail = "" if len(body) <= 24 else f" … +{len(body) - 24} bytes"
+    return f"<binary {len(body)} bytes> {head}{tail}"
+
 
 class LogBuffer:
     def __init__(self, capacity: int = 500):
@@ -56,13 +79,17 @@ class LogBuffer:
 
         Decoding is lenient: serial bytes can be garbage before the firmware has
         configured the port, and losing the whole stream to one bad byte would be
-        worse than showing a replacement character.
+        worse than showing it. A line that is mostly binary is summarised rather
+        than decoded -- see describe_line().
         """
         for raw in iter(stream.readline, b""):
-            line = raw.decode("utf-8", "replace").rstrip("\r\n")
-            if not line:
-                continue
-            if line.startswith("SERIAL "):
-                self.add("serial", line[len("SERIAL "):])
-            else:
-                self.add(default_source, line)
+            # Strip the model's tag before looking at the bytes: on a binary line the
+            # hex summary would otherwise hide the prefix and the line would lose its
+            # "serial" attribution.
+            source = default_source
+            if raw.startswith(b"SERIAL "):
+                source = "serial"
+                raw = raw[len(b"SERIAL "):]
+            line = describe_line(raw)
+            if line:
+                self.add(source, line)

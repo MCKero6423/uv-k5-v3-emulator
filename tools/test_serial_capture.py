@@ -50,7 +50,9 @@ def main():
     if os.path.exists(QMP):
         os.unlink(QMP)
 
-    text = open(LOG, errors="replace").read()
+    # Explicit UTF-8: the firmware's own output is not always ASCII, and the locale
+    # codec on Windows would mangle it (it cannot decode Chinese at all).
+    text = open(LOG, encoding="utf-8", errors="replace").read()
     lines = [l for l in text.splitlines() if l.startswith("SERIAL")]
     print(f"captured {len(lines)} SERIAL line(s)")
     for line in lines[:10]:

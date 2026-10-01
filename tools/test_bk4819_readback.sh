@@ -35,11 +35,11 @@ trap 'cp /tmp/bk-readback-orig.c "$SRC"; cp "$SRC" "$QSRC" 2>/dev/null || true; 
 python3 - "$SRC" "$SEED" <<'PY'
 import sys
 src, seed = sys.argv[1], sys.argv[2]
-s = open(src).read()
+s = open(src, encoding="utf-8").read()
 needle = "    s->regs[BK4819_REG_NOISE] = 0x0010;"
 if needle not in s:
     sys.exit("seed point not found; has bk4819_seed_measurements changed?")
-open(src, "w").write(s.replace(needle, f"{needle}\n    s->regs[0x0C] = {seed};", 1))
+open(src, "w", encoding="utf-8").write(s.replace(needle, f"{needle}\n    s->regs[0x0C] = {seed};", 1))
 PY
 
 cp "$SRC" "$QSRC"

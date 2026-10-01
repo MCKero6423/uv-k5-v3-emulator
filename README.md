@@ -38,6 +38,7 @@ has no public datasheet, so its driver is the only specification available.
 | --- | --- |
 | Boot to main loop | works, ~5 s |
 | LCD contents | readable via `tools/screenshot.py` |
+| Display contrast / inversion | panel settings, read from the controller; inversion also changes the rendered picture |
 | SPI flash, settings, calibration | works, and persists across power cycles |
 | Frequency entry | works, stored per band and kept |
 | Keypad and menu navigation | works, including waking from power save |
@@ -83,6 +84,9 @@ keypresses silently stop working. Run the test after touching that code;
     *.zh-CN.md               Chinese translations, kept in step
     docs/screenshots/        LCD captures used in this README
     tools/                   run, screenshot, inject keys, probe state
+      bin2elf.py             wrap a release .bin so QEMU can load it as a kernel
+      make_flash.py          build assets/flash.img; --blob puts extra data (the
+                             font packs a Chinese build needs) at chosen offsets
       keypad_test.py         keypad regression test, boots its own instance
       test_flash_persist.py  flash writes survive a power cycle
       test_freq_entry.py     a typed frequency takes effect and persists
@@ -113,6 +117,66 @@ keypresses silently stop working. Run the test after touching that code;
       (plus ad-hoc probe scripts -- scan_trace.sh, gpio_watch.py and friends --
        kept because they are quick to reach for, not because they are polished)
     harness/, stubs/, shim/, tests/   host build of the CW timing chain (stage A)
+
+## What is not in this repository
+
+Two things are deliberately absent, and neither should be committed:
+
+- **Firmware.** Released images, localised builds and bootloader dumps belong to whoever
+  made them, not to this project. `tools/fetch_firmware.py` fetches a release from the
+  upstream archive into `assets/firmware/` when a test or a run needs one, and that
+  directory is ignored.
+- **Anything read off a real radio.** `work/data.bin` is an EEPROM dump -- settings and
+  calibration from somebody's hardware. It is not a build artifact. It is ignored now, and
+  the tests build their own flash images from `assets/pristine/` instead.
+
+`assets/pristine/flash-pristine.img.gz` and `assets/calibration.bin` do ship: they are a
+2 KB synthetic pair that `tools/make_flash.py` assembles into a flash image, not data
+from a radio.
+
+The rest of `work/` is scratch -- images, logs, captures from a debugging session. The
+four scripts in it are tracked on purpose, because they document how this machine is
+driven; everything else is ignored.
+
+**If any of that is already in the history, removing it now is not enough.** The objects
+stay reachable, so publishing this repository needs the history filtered
+(`git filter-repo`) or a fresh one. Check before pushing:
+
+    git log --stat -- work/data.bin assets/firmware
+
+## Quick start
+
+Five minutes from a checkout to a running radio on a web page.
+
+    # 1. A QEMU 7.2 tree, patched and built. Building by hand means copying three files
+    #    into the tree, editing Kconfig and meson.build, then configure and ninja; this
+    #    is those same steps (see Building below for what it does).
+    QEMU_SRC=~/src/qemu-7.2 bash tools/setup_qemu.sh
+
+    # 2. A firmware to run. Firmware is not redistributed here -- this fetches a release
+    #    from the upstream project's archive into assets/firmware/ and prints its hash.
+    python3 tools/fetch_firmware.py
+
+    # 3. The external flash image the firmware keeps its settings in.
+    python3 tools/make_flash.py
+
+    # 4. Run it.
+    python3 tools/webui.py --qemu ~/src/qemu-7.2/build/qemu-system-arm \
+        --elf assets/firmware/f4hwn.fieldops.v6.0.0.bin     # then open http://127.0.0.1:8080/
+
+`--frame-addr` and `--status-addr` default to one known build and move between builds;
+see [Web remote control](#web-remote-control) for how to find them. On Windows,
+`work/run-webui.ps1` wraps step 4 with this machine's paths.
+
+Drop any `.bin` on the page to boot it. The page's **Firmware slots** table reads and
+writes the multi-system firmware's four slots in the flash image, and **Multiboot**
+restarts holding MENU so its boot menu comes up -- in a build that has one: the page
+labels builds that do not, because there the button can do nothing at all.
+
+Then check it still works:
+
+    bash tools/run_tests.sh -q     # ~15 s, no emulator
+    bash tools/run_tests.sh        # everything; needs the tree from step 1
 
 ## Building
 
@@ -155,6 +219,7 @@ that was never compiled. Individual tests still run standalone:
     python3 tools/test_flash_persist.py
     python3 tools/test_freq_entry.py
     python3 tools/test_serial_rx.py
+    python3 tools/test_slot_serial.py
     python3 tools/test_bk4819.py
     bash tools/test_bk4819_readback.sh
     python3 tools/test_smeter.py
@@ -241,10 +306,22 @@ Endpoints, if you want to script it:
 | `POST /api/release-all` | release every key and PTT, if one ever sticks |
 | `POST /api/power/<action>` | `on`, `off`, `reset`, `pause`, `resume` |
 | `GET /api/logs?since=N` | log entries after cursor N, with client IPs |
-| `GET /api/status` | QMP `query-status`, plus a `speaker` field |
+| `GET /api/status` | QMP `query-status`, plus `speaker`, `panel` and `firmware` |
+| `GET /api/firmware` | the loaded image, and how it will be loaded |
+| `POST /api/firmware` | body is a `.bin` or `.elf`; boots it and restarts the emulator |
+| `GET /api/slots` | the firmware slots in the flash image the emulator uses |
+| `POST /api/slots/<n>` | body is a `.bin`; writes it into slot `n` and restarts |
+| `POST /api/slots/<n>/erase` | erase slot `n` |
+| `POST /api/flash` | body is a flash image; use it from now on |
 
-Frames are read with QMP `memsave`, about 1.35 ms each, and the guest keeps
-running throughout. Two details there are easy to get wrong:
+Frames now come from the display controller's own memory: a QMP `qom-get` on the
+panel's `gram` property, so the picture is right whoever wrote the firmware and
+wherever it keeps its buffers. Builds that share an ancestor still differ in their
+display logic -- the multi-system release keeps its image somewhere else entirely.
+
+The older path reads `gFrameBuffer` and `gStatusLine` out of guest RAM with QMP
+`memsave` (~1.35 ms per frame) and remains as the fallback for an emulator built
+without the panel model. The two cautions below apply to that path:
 
 - **`memsave`, not `pmemsave`.** The framebuffer symbols are CPU virtual
   addresses. `pmemsave` treats its argument as physical and returns a block of
@@ -259,6 +336,64 @@ Two constraints worth knowing before you use it:
   cannot talk to the same emulator.
 - **There is no authentication.** Anyone who reaches the port has full control of
   the emulated radio. It binds loopback by default for that reason.
+
+### Loading firmware from the page
+
+Drop a `.bin` anywhere on the page, or use the Firmware control, and the server
+stores it and boots it. No ELF wrapping, no address to look up.
+
+Two shapes exist and they need different load addresses:
+
+| shape | how it is recognised | load address |
+| --- | --- | --- |
+| application | reset handler past `0x08002800` | `0x08002800` |
+| full-flash | reset handler inside the bootloader region (`0x08000000`..`0x080027ff`) | `0x08000000` |
+
+An `.elf` carries its own program headers and needs neither. This is read out of the
+image's first two words -- `tools/uvk5_image.py` on the host, `uvk5_sniff_app_offset()`
+in the machine -- rather than taken from a flag or a file name, because getting it
+wrong is silent: the image lands `0x2800` bytes off and the first fetch reads whatever
+data is there. A file that is not a bootable image is refused with 400 and the radio
+keeps running what it had.
+
+Uploads live in `work/firmware/` (`UVK5_UPLOAD_DIR` moves it), and while the emulator
+is running an upload restarts it, since the image is chosen when QEMU is spawned.
+
+Both shapes are verified end to end here: an application `.bin`, an `.elf`, and a
+full-flash image whose bootloader entry branches to the application at `0x08002800`
+all reach the same drawn screen.
+
+### Firmware slots, and the multi-system release
+
+The v6.0.0 release keeps a boot menu and four firmware slots in the external flash: hold
+MENU at power-on and it lists them, and choosing one reflashes the internal flash from that
+slot and resets. Both halves are reachable from the page.
+
+- **Firmware slots** shows one row per slot with the name, version, size and whether the
+  header CRC-32 matches the image. Write a `.bin` into a slot, or erase one. Edits go to a
+  working copy of the flash image (`work/firmware/flash-current.img`), never to the file the
+  server was started with, and the emulator is restarted to pick them up.
+- **Multiboot** (or Shift+M) restarts the emulator with MENU held *from reset*. The page
+  cannot do that with key events, because the firmware samples the keypad in the first
+  milliseconds after reset. On the machine it is `-M uv-k5-v3,boot-key=MENU` or
+  `UVK5_BOOT_KEY`, held for `UVK5_BOOT_KEY_MS` (8 s by default: the boot path can spend
+  20 s adopting the running firmware into slot 0 before anything samples the keypad).
+- `tools/uvk5_slots.py` does the same offline: write a slot into a flash image, and print
+  what each slot holds.
+
+The layout is the firmware's, from `App/driver/mb_flash.h`: slot 0 at `0x020000` backs up
+the internal image, slots 1..4 follow at `0x040000` in 128 KiB steps, the image starts one
+4 KiB sector into the slot, and the 64-byte header carries magic `FMB1`, the image size and
+a CRC-32. The firmware's own `0x0720`..`0x0727` serial commands write slots the same way,
+which is what the Windows tools use.
+
+Two behaviours look like the emulator misbehaving and are not. A **corrupt** active-state
+marker next to a valid slot 0 makes the firmware halt on a `STATE ERROR` screen to protect
+Main, and a **missing** marker makes it adopt the running firmware into slot 0 -- reflashing
+the external flash -- before the menu appears. Writing a slot erases those marker sectors so
+it can decide again. The internal flash is programmable in the model (`0x40022000`:
+unlock, page erase, program, EOP, never busy), so restoring a slot really does replace the
+image the CPU executes after the reset.
 
 ### Reaching it from elsewhere
 
@@ -336,7 +471,8 @@ Register layouts come from the vendor CMSIS header shipped with the firmware
     SPI2   0x40003800   flash
     ADC1   0x40012400
 
-Modelled: RCC, GPIO, ADC, both SPI controllers, DMA1, TIM2, and the PY25Q16 flash.
+Modelled: RCC, GPIO, ADC, both SPI controllers, DMA1, TIM2, the PY25Q16 flash, and
+the ST7565 display controller's own settings (contrast, inversion, display on/off).
 Everything else answers through a logging catch-all — the log is how the next
 thing worth modelling gets identified.
 
@@ -404,6 +540,48 @@ on a host would let the tests drift from what the radio runs. The debounce in
 `CW_ReadKeys` is transcribed rather than stubbed, because its asymmetry (three
 consecutive reads to register a press, immediate release) is part of the timing
 behaviour under test.
+
+## The display controller's own settings
+
+Contrast (`SetCtr`) and display inversion (`SetInv`) are commands to the ST7565, not
+framebuffer content — `0x81 <value>` and `0xA6`/`0xA7` — so `gFrameBuffer` does not
+change and anything that renders that buffer shows no effect at all. That is why there
+is a small `TYPE_ST7565` behind SPI1 (A0 on PA6, CS on PB2, the pins
+`App/driver/st7565.c` uses). It parses the command stream and exposes three
+read-only properties:
+
+    qom-get /machine/panel invert        # last of 0xA6 / 0xA7
+    qom-get /machine/panel contrast      # the value following 0x81
+    qom-get /machine/panel display-on    # last of 0xAE / 0xAF
+
+`tools/uvk5_lcd.py` applies the inversion when it renders, because that effect is
+fully determined, so the menu entry is visible in the web UI. Contrast is analogue —
+how dark the glass gets — and is only reported. `/api/status` carries all three and
+the page shows them beside the speaker glyph. `display-on` is reported but not acted
+on: whether a software reset (`0xE2`) clears that latch is not certain, and blanking
+the screen on a guess would be worse than leaving the image alone.
+
+## On Windows
+
+The emulator, the models and the tools are portable; the packaging was not. Four
+things differ, and all four are handled in-tree now:
+
+- **QMP over TCP.** A Windows build of QEMU cannot create a unix socket, so an
+  endpoint may be `host:port` as well as a path — `tools/uvk5_qmp.py`,
+  `tools/key.py` and `tools/uvk5_supervisor.py` all accept both.
+- **One build fix.** MSYS2's mingw-w64 packages build QEMU 7.2 as-is except that
+  `qemu/py32f071.c` needs `#include "qapi/visitor.h"` for `visit_type_uint64`, which
+  a stock tree does not pull in transitively.
+- **A release `.bin` is not a kernel image.** `armv7m_load_kernel()` loads a raw
+  binary at the address it is handed, which here is the flash *alias*, so a `.bin`
+  lands 0x2800 bytes too high and never boots. `tools/bin2elf.py` wraps it in an
+  ELF32/ARM header with the right program header, which is what `-kernel` wants.
+- **The Chinese font packs live in the SPI flash**, not in the firmware:
+  `tools/make_flash.py --blob 0:pack.uf2` places every UF2 block at its own target
+  address. Without that the font area reads as 0xFF.
+
+`work/` holds a Windows bring-up record: the launcher scripts, the frame addresses
+proven against the firmware source, and the failures that cost time.
 
 ## Licence
 

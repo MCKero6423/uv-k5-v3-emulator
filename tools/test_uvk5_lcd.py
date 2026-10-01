@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zlib
 
+import uvk5_lcd
 from uvk5_lcd import (FRAME_BYTES, LCD_HEIGHT, LCD_WIDTH, STATUS_BYTES,
                       FrameGrabber, encode_png, unpack)
 
@@ -89,8 +90,10 @@ class StubClient:
     reported anywhere, which is exactly the bug this stub is here to catch.
     """
 
-    def __init__(self):
+    def __init__(self, invert=False, contrast=31, display_on=True):
         self.calls = []
+        self.panel = {"invert": invert, "contrast": contrast,
+                      "display-on": display_on}
 
     def command(self, name, **args):
         self.calls.append((name, args))
@@ -98,6 +101,11 @@ class StubClient:
             raise AssertionError(
                 "pmemsave reads physical addresses and silently returns zeros "
                 "for gFrameBuffer; use memsave")
+        if name == "qom-get":
+            # The panel's own settings, which are not in the framebuffer at all.
+            if args.get("path") != uvk5_lcd.PANEL_PATH:
+                raise AssertionError(f"unexpected qom-get path {args.get('path')}")
+            return self.panel[args["property"]]
         if name != "memsave":
             raise AssertionError(f"unexpected command {name}")
         with open(args["filename"], "wb") as fh:
@@ -114,7 +122,30 @@ class TestFrameGrabber(unittest.TestCase):
         png = grabber.png(scale=2)
 
         self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
-        self.assertEqual([c[0] for c in client.calls], ["memsave", "memsave"])
+        # Two reads, in frame-then-status order, followed by the panel's own
+        # settings -- inversion and contrast live in the controller, not in RAM.
+        self.assertEqual([c[0] for c in client.calls],
+                         ["memsave", "memsave"] + ["qom-get"] * 3)
+
+    def test_panel_inversion_flips_the_picture(self):
+        """SetInv (0xA7) changes no byte of gFrameBuffer, so the render has to follow
+        the controller or the menu entry looks like it did nothing."""
+        tmp = tempfile.mkdtemp()
+        normal = FrameGrabber(StubClient(invert=False), 0x1000, 0x2000, spool_dir=tmp)
+        flipped = FrameGrabber(StubClient(invert=True), 0x1000, 0x2000,
+                               spool_dir=tempfile.mkdtemp())
+        self.assertNotEqual(normal.png(scale=1), flipped.png(scale=1))
+
+    def test_display_off_is_reported_but_does_not_blank_the_frame(self):
+        """Whether a software reset (0xE2) clears the display-on latch is not certain,
+        so the flag is reported rather than acted on: blanking the screen on a guess
+        would be worse than leaving the image alone."""
+        off = FrameGrabber(StubClient(display_on=False), 0x1000, 0x2000,
+                           spool_dir=tempfile.mkdtemp())
+        on = FrameGrabber(StubClient(display_on=True), 0x1000, 0x2000,
+                          spool_dir=tempfile.mkdtemp())
+        self.assertFalse(off.panel_state()[2])
+        self.assertEqual(off.png(scale=1), on.png(scale=1))
 
     def test_reads_the_right_addresses_and_sizes(self):
         client = StubClient()

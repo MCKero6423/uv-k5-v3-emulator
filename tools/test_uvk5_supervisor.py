@@ -3,6 +3,8 @@
 import os
 import socket
 import unittest
+
+import uvk5_socket
 import unittest.mock
 
 from uvk5_supervisor import Supervisor
@@ -216,6 +218,8 @@ class TestWaitForSocket(unittest.TestCase):
         import shutil
         shutil.rmtree(self.dir, ignore_errors=True)
 
+    @unittest.skipUnless(uvk5_socket.can_use_unix(),
+                         "needs unix sockets, which a Windows QEMU cannot create")
     def test_returns_false_for_a_stale_socket_file(self):
         from uvk5_supervisor import wait_for_socket
         # A socket file with nothing listening: bind then close.
@@ -225,6 +229,8 @@ class TestWaitForSocket(unittest.TestCase):
         self.assertTrue(os.path.exists(self.path), "need a leftover file")
         self.assertFalse(wait_for_socket(self.path, timeout=0.5))
 
+    @unittest.skipUnless(uvk5_socket.can_use_unix(),
+                         "needs unix sockets, which a Windows QEMU cannot create")
     def test_returns_true_when_something_is_listening(self):
         from uvk5_supervisor import wait_for_socket
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

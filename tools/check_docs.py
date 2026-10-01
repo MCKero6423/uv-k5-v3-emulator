@@ -27,12 +27,16 @@ and the checker was broken. A checker that cries wolf gets ignored, so anything 
 cannot verify unambiguously is left out rather than guessed at.
 """
 
+import os
 import pathlib
 import re
 import sys
 
 SIM = pathlib.Path(__file__).resolve().parent.parent
-FW = pathlib.Path("/root/uvk5-port/uvk5-sat/App")
+# Where the firmware sources are. Override when the tree is not at the default
+# path -- without that the checker cannot run anywhere but the machine it was
+# written on, and the file:line checks are the ones that catch drifting prose.
+FW = pathlib.Path(os.environ.get("UVK5_FW_DIR", "/root/uvk5-port/uvk5-sat/App"))
 
 PAIRS = [
     ("README.md", "README.zh-CN.md"),
@@ -95,7 +99,7 @@ def resolve_fw(name):
 def check_tools_exist():
     print("tools named in a README must exist")
     for doc in ("README.md", "README.zh-CN.md"):
-        text = (SIM / doc).read_text()
+        text = (SIM / doc).read_text(encoding="utf-8")
         for tool in sorted(set(re.findall(r"tools/([a-z0-9_]+\.(?:py|sh))", text))):
             if not (SIM / "tools" / tool).exists():
                 fail(f"{doc} names tools/{tool}, which does not exist")
@@ -103,10 +107,10 @@ def check_tools_exist():
 
 def check_tests_documented():
     print("every test in run_tests.sh must be documented")
-    runner = (SIM / "tools" / "run_tests.sh").read_text()
+    runner = (SIM / "tools" / "run_tests.sh").read_text(encoding="utf-8")
     in_runner = set(re.findall(r"tools/([a-z0-9_]+\.(?:py|sh))", runner))
     for doc in ("README.md", "README.zh-CN.md"):
-        text = (SIM / doc).read_text()
+        text = (SIM / doc).read_text(encoding="utf-8")
         for tool in sorted(in_runner):
             if tool not in text:
                 fail(f"{doc} does not mention {tool}, which run_tests.sh runs")
@@ -116,7 +120,7 @@ def check_links():
     print("internal .md links must resolve")
     for doc in [d for pair in PAIRS for d in pair]:
         path = SIM / doc
-        for target in re.findall(r"\]\(([^)]+\.md)\)", path.read_text()):
+        for target in re.findall(r"\]\(([^)]+\.md)\)", path.read_text(encoding="utf-8")):
             if target.startswith("http"):
                 continue
             if not (path.parent / target).exists():
@@ -126,8 +130,8 @@ def check_links():
 def check_pairs():
     print("translation pairs must have matching structure")
     for en_name, zh_name in PAIRS:
-        en = re.findall(r"^(#+) (.+)$", (SIM / en_name).read_text(), re.M)
-        zh = re.findall(r"^(#+) (.+)$", (SIM / zh_name).read_text(), re.M)
+        en = re.findall(r"^(#+) (.+)$", (SIM / en_name).read_text(encoding="utf-8"), re.M)
+        zh = re.findall(r"^(#+) (.+)$", (SIM / zh_name).read_text(encoding="utf-8"), re.M)
         if len(en) != len(zh):
             fail(f"{en_name} has {len(en)} headings, {zh_name} has {len(zh)}")
             continue
@@ -139,7 +143,7 @@ def check_pairs():
 
 def check_memory_map():
     print("memory-map addresses must match the model")
-    model = (SIM / "qemu" / "py32f071.c").read_text()
+    model = (SIM / "qemu" / "py32f071.c").read_text(encoding="utf-8")
     for sym, documented in MEMORY_MAP.items():
         m = re.search(rf"#define {sym}\s+(\S+)", model)
         if not m:
@@ -161,7 +165,7 @@ def check_documented_flags():
     """
     print("documented tool flags must exist")
     text = "\n".join(
-        (SIM / doc).read_text() for pair in PAIRS for doc in pair)
+        (SIM / doc).read_text(encoding="utf-8") for pair in PAIRS for doc in pair)
     joined = re.sub(r"\\\s*\n\s*", " ", text)
 
     claims = {}
@@ -173,7 +177,7 @@ def check_documented_flags():
         path = SIM / "tools" / tool
         if not path.exists():
             continue        # already reported by check_tools_exist
-        src = path.read_text()
+        src = path.read_text(encoding="utf-8")
         for flag in sorted(flags):
             if flag not in src:
                 fail(f"docs pass {flag} to {tool}, which does not accept it")
@@ -186,7 +190,7 @@ def check_line_refs():
         if path is None:
             fail(f"{name} is referenced but not found in the firmware tree")
             continue
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
         if line > len(lines):
             fail(f"{name}:{line} is past the end of the file ({len(lines)} lines)")
             continue

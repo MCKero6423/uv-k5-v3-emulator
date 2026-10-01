@@ -17,15 +17,17 @@ looks live.
 import threading
 import time
 
-from uvk5_lcd import FrameGrabber, encode_png, unpack
+from uvk5_lcd import FrameGrabber, default_spool_dir, encode_png, unpack
 
 
 class FramePump:
     def __init__(self, client, frame_addr: int, status_addr: int,
-                 fps: int = 15, scale: int = 4, spool_dir: str = "/dev/shm"):
+                 fps: int = 15, scale: int = 4, spool_dir: str = None):
         self._frame_addr = frame_addr
         self._status_addr = status_addr
-        self._spool_dir = spool_dir
+        # Resolved by FrameGrabber: /dev/shm on Linux, the temp directory on
+        # Windows, where /dev/shm does not exist.
+        self._spool_dir = spool_dir or default_spool_dir()
         self._interval = 1.0 / fps
         self._scale = scale
         self._lock = threading.Lock()
@@ -68,17 +70,19 @@ class FramePump:
                 grabber = self._grabber
             if grabber is not None:
                 try:
-                    status, frame = grabber.raw()
+                    status, frame, pixels = self._grab(grabber)
                     current = (status, frame)
                     with self._lock:
                         # Re-check: a rebind may have landed mid-read, and its
                         # blanking must not be undone by this stale frame.
                         if self._grabber is grabber and current != self._raw:
                             self._raw = current
-                            self._png = encode_png(unpack(status, frame),
-                                                   self._scale)
+                            self._png = encode_png(pixels, self._scale)
                             self._generation += 1
                 except Exception:
+                    # A dead emulator must not kill the pump: power may come
+                    # back, and latest() keeps serving the last good frame.
+                    pass
                     # A dead emulator must not kill the pump: power may come
                     # back, and latest() keeps serving the last good frame.
                     pass
@@ -86,6 +90,25 @@ class FramePump:
             if slack > 0:
                 self._stop.wait(slack)
 
+
+    def _grab(self, grabber):
+        """One frame: (status, frame, pixels), from the panel if it is there.
+
+        Every firmware pushes its pixels through the display controller, so the
+        controller's memory is the screen no matter where that build keeps its own
+        buffers -- and builds sharing an ancestor still differ in their display
+        logic, which is why guessing guest addresses does not generalise.
+
+        Guest RAM remains the fallback for an emulator built without the panel
+        model, and is what the tests stub.
+        """
+        try:
+            pixels = grabber.panel_pixels()
+            gram = grabber.panel_gram()
+            return gram[:STATUS_BYTES], gram[STATUS_BYTES:], pixels
+        except Exception:
+            status, frame = grabber.raw()
+            return status, frame, unpack(status, frame)
     def latest(self):
         with self._lock:
             return self._png

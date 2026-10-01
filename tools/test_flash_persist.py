@@ -31,13 +31,16 @@ import sys
 import tempfile
 import time
 
+import uvk5_socket
+import uvk5_testenv
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIM = os.path.dirname(HERE)
-QEMU = os.path.expanduser("~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm")
-ELF = os.path.expanduser("~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf")
+QEMU = uvk5_testenv.qemu()
+ELF = uvk5_testenv.firmware()
 SOURCE_IMAGE = os.path.join(SIM, "assets", "flash.img")
 
-QMP = "/tmp/uvk5-persist-test.sock"
+QMP = uvk5_socket.server_endpoint("qmp")
 
 # Flash offsets the firmware demonstrably writes during a boot, measured rather than
 # guessed. The mapping is in App/driver/eeprom_compat.c: these are *flash* addresses,
@@ -59,10 +62,14 @@ MUST_NOT_CHANGE = [("vfo frequencies", 0x009000, 0xD6)]
 
 
 class Qmp:
-    def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    def __init__(self, endpoint):
+        # A socket or an endpoint: QEMU's QMP takes one client, so the caller that
+        # waited for it hands its connection in.
+        if hasattr(endpoint, "recv"):
+            self.sock = endpoint
+        else:
+            self.sock = uvk5_socket.connect(endpoint, timeout=30)
         self.sock.settimeout(25)
-        self.sock.connect(path)
         self.buf = b""
         self._readline()
         self.command("qmp_capabilities")
@@ -100,17 +107,12 @@ def boot(image):
         os.unlink(QMP)
     proc = subprocess.Popen(
         [QEMU, "-M", f"uv-k5-v3,flash-image={image}", "-nographic",
-         "-monitor", "none", "-qmp", f"unix:{QMP},server=on,wait=off",
+         "-monitor", "none", "-qmp", QMP,
          "-kernel", ELF],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.time() + 25
-    while time.time() < deadline:
-        if os.path.exists(QMP):
-            return proc, Qmp(QMP)
-        time.sleep(0.1)
-    proc.kill()
-    raise RuntimeError("QMP socket never appeared")
-
+    # Qmp() connects, and uvk5_socket retries until QEMU's QMP answers, so there is no
+    # socket path to wait for -- and on Windows there would not be one.
+    return proc, Qmp(QMP)
 
 def shutdown(proc, qmp):
     """Quit through QMP, which is exactly what the web UI's power off does."""
@@ -142,10 +144,9 @@ def snapshot(path):
 
 
 def main():
-    for path, what in ((QEMU, "QEMU"), (ELF, "firmware"),
-                       (SOURCE_IMAGE, "flash image")):
-        if not os.path.exists(path):
-            sys.exit(f"missing {what}: {path}")
+    _missing = uvk5_testenv.missing([(p, w, "see the README Quick start") for p, w in ((QEMU, "QEMU"), (ELF, "firmware"))])
+    if _missing:
+        return uvk5_testenv.skip(_missing)
 
     workdir = tempfile.mkdtemp(prefix="uvk5-persist-")
     image = os.path.join(workdir, "flash.img")

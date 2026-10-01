@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """Unit tests for the web UI. Stubs the QMP client, so no emulator needed."""
+import os
+import re
+import shutil
+import struct
+import subprocess
+import tempfile
 import time
 import unittest
 
+import uvk5_image
 import webui
+from uvk5_supervisor import FlashSlot
 
 
 class StubClient:
@@ -725,6 +733,13 @@ class TestClientIpInLogs(unittest.TestCase):
     def test_entries_without_a_request_have_no_ip(self):
         """Firmware serial and qemu output come from no client at all."""
         from uvk5_logs import LogBuffer
+
+try:
+    from uvk5_supervisor import FlashSlot as flash_holder
+except Exception:  # pragma: no cover - the supervisor is optional here
+    class flash_holder:
+        def __init__(self, path):
+            self.path = path
         log = LogBuffer()
         log.add("serial", "boot banner")
         self.assertIsNone(log.entries()[-1]["ip"])
@@ -738,6 +753,113 @@ class TestClientIpInLogs(unittest.TestCase):
         tmpl = line[0]
         self.assertLess(tmpl.index("e.time"), tmpl.index("ip"))
         self.assertLess(tmpl.index("ip"), tmpl.index("e.source"))
+
+
+class TestFirmwareEndpoints(unittest.TestCase):
+    """Uploading firmware. The body is the image; its shape comes from the image."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old_upload_dir = os.environ.get("UVK5_UPLOAD_DIR")
+        os.environ["UVK5_UPLOAD_DIR"] = self.tmp
+        self.slot = uvk5_image.ImageSlot()
+        self.client = StubClient()
+        self.sup = FakeSupervisor(self.client)
+        app = webui.create_app(self.client, frame_addr=0x1000, status_addr=0x2000,
+                               supervisor=self.sup, image=self.slot)
+        app.config.update(TESTING=True)
+        self.http = app.test_client()
+
+    def tearDown(self):
+        if self._old_upload_dir is None:
+            os.environ.pop("UVK5_UPLOAD_DIR", None)
+        else:
+            os.environ["UVK5_UPLOAD_DIR"] = self._old_upload_dir
+
+    @staticmethod
+    def app_image(size=0x4000):
+        """An application image: vector table first, entry past the app offset."""
+        buf = bytearray(size)
+        struct.pack_into("<II", buf, 0, 0x20004000, 0x08002d49)
+        return bytes(buf)
+
+    @staticmethod
+    def full_flash_image(size=0x4000):
+        buf = bytearray(size)
+        struct.pack_into("<II", buf, 0, 0x200032c0, 0x08000901)   # entry in the BL region
+        return bytes(buf)
+
+    def upload(self, data, name="fw.bin", http=None):
+        return (http or self.http).post(
+            "/api/firmware?name=" + name, data=data,
+            content_type="application/octet-stream")
+
+    def test_reports_nothing_loaded_at_first(self):
+        body = self.http.get("/api/firmware").get_json()
+        self.assertFalse(body["loaded"])
+        self.assertIsNone(body["firmware"])
+
+    def test_upload_adopts_the_image_and_restarts(self):
+        res = self.upload(self.app_image())
+        self.assertEqual(res.status_code, 200)
+        info = res.get_json()
+        self.assertEqual(info["firmware"]["kind"], "application")
+        self.assertEqual(info["firmware"]["app_offset"], uvk5_image.APP_OFFSET)
+        self.assertTrue(info["restarted"])
+        self.assertIn("power_off", self.sup.calls)
+        self.assertIn("power_on", self.sup.calls)
+        self.assertEqual(self.slot.current.kind, "application")
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "fw.bin")))
+
+    def test_upload_recognises_a_full_flash_image(self):
+        res = self.upload(self.full_flash_image(), name="bl.bin")
+        self.assertEqual(res.status_code, 200)
+        info = res.get_json()["firmware"]
+        self.assertEqual(info["kind"], "full-flash")
+        self.assertEqual(info["app_offset"], 0)
+
+    def test_upload_while_off_does_not_try_to_restart(self):
+        sup = FakeSupervisor(None)
+        app = webui.create_app(None, 0x1000, 0x2000, supervisor=sup, image=self.slot)
+        app.config.update(TESTING=True)
+        res = self.upload(self.app_image(), http=app.test_client())
+        self.assertFalse(res.get_json()["restarted"])
+        self.assertNotIn("power_on", sup.calls)
+        self.assertNotIn("power_off", sup.calls)
+
+    def test_a_file_that_is_not_an_image_changes_nothing(self):
+        self.slot.set(os.path.join(self.tmp, "good.bin")) if False else None
+        first = self.upload(self.app_image(), name="good.bin")
+        self.assertEqual(first.status_code, 200)
+        kept = self.slot.current.path
+        self.sup.calls.clear()
+        res = self.upload(b"this is not a firmware image" * 40, name="junk.bin")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("vector table", res.get_json()["error"])
+        # The radio is left exactly as it was, still running, still the old image.
+        self.assertEqual(self.slot.current.path, kept)
+        self.assertNotIn("power_off", self.sup.calls)
+        self.assertNotIn("power_on", self.sup.calls)
+
+    def test_empty_body_is_rejected(self):
+        res = self.upload(b"", name="empty.bin")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("no image", res.get_json()["error"])
+
+    def test_oversized_body_is_rejected(self):
+        res = self.upload(b"\x00" * (webui.MAX_UPLOAD_BYTES + 1), name="big.bin")
+        self.assertEqual(res.status_code, 413)
+
+    def test_upload_without_an_image_slot_is_refused(self):
+        app = webui.create_app(self.client, 0x1000, 0x2000, supervisor=self.sup, image=None)
+        app.config.update(TESTING=True)
+        res = self.upload(self.app_image(), http=app.test_client())
+        self.assertEqual(res.status_code, 409)
+
+    def test_the_name_cannot_escape_the_upload_directory(self):
+        res = self.upload(self.app_image(), name="..%2F..%2Fevil.bin")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(os.path.dirname(self.slot.current.path), self.tmp)
 
 
 if __name__ == "__main__":
@@ -791,3 +913,127 @@ class TestSpeakerIndicator(unittest.TestCase):
         for forbidden in ("getUserMedia", "AudioContext", "navigator.mediaDevices",
                           "new Audio", "<audio"):
             self.assertNotIn(forbidden, body)
+
+
+class TestFirmwareSlots(unittest.TestCase):
+    """The firmware slot endpoints behind the page's slot table.
+
+    These edit the external-flash image the emulator boots from, so most of what is
+    worth asserting is not the bytes but the ordering: power off first (the emulator
+    writes its own copy back while it runs), edit a working copy, power on again.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old = os.environ.get("UVK5_UPLOAD_DIR")
+        os.environ["UVK5_UPLOAD_DIR"] = self.tmp
+        self.flash = os.path.join(self.tmp, "base.img")
+        with open(self.flash, "wb") as fh:
+            fh.write(b"\xff" * (2 * 1024 * 1024))
+        self.holder = FlashSlot(self.flash)
+        self.client = StubClient()
+        self.sup = FakeSupervisor(self.client)
+        self.app = webui.create_app(self.client, frame_addr=0x1000, status_addr=0x2000,
+                                    supervisor=self.sup, flash=self.holder)
+        self.app.config.update(TESTING=True)
+        self.web = self.app.test_client()
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("UVK5_UPLOAD_DIR", None)
+        else:
+            os.environ["UVK5_UPLOAD_DIR"] = self._old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_lists_five_empty_slots(self):
+        body = self.web.get("/api/slots").get_json()
+        self.assertEqual(len(body["slots"]), 5)
+        self.assertTrue(all(s["empty"] for s in body["slots"]))
+        self.assertEqual(body["slots"][0]["base"], 0x020000)
+        self.assertEqual(body["slots"][4]["base"], 0x0A0000)
+
+    def test_writing_a_slot_programs_a_valid_header(self):
+        image = bytes(range(256)) * 4
+        r = self.web.post("/api/slots/1?name=testfw&version=9.9",
+                          data=image, content_type="application/octet-stream")
+        self.assertEqual(r.status_code, 200)
+        slot = r.get_json()["slot"]
+        self.assertEqual(slot["image_size"], len(image))
+        self.assertTrue(slot["crc_ok"], "the header CRC must describe the image written")
+        self.assertNotEqual(os.path.abspath(self.holder.path),
+                            os.path.abspath(self.flash))
+        with open(self.holder.path, "rb") as fh:
+            self.assertEqual(fh.read()[0x040000:0x040004], b"FMB1")
+
+    def test_writing_powers_the_emulator_off_before_editing_and_back_on(self):
+        self.web.post("/api/slots/2", data=b"x" * 512,
+                      content_type="application/octet-stream")
+        self.assertEqual(self.sup.calls[:2], ["power_off", "power_on"])
+
+    def test_erasing_clears_the_slot(self):
+        self.web.post("/api/slots/3", data=b"y" * 512,
+                      content_type="application/octet-stream")
+        self.assertFalse(self.web.get("/api/slots").get_json()["slots"][3]["empty"])
+        self.web.post("/api/slots/3/erase")
+        self.assertTrue(self.web.get("/api/slots").get_json()["slots"][3]["empty"])
+
+    def test_rejects_an_out_of_range_slot(self):
+        r = self.web.post("/api/slots/9", data=b"z", content_type="application/octet-stream")
+        self.assertEqual(r.status_code, 400)
+
+    def test_rejects_an_empty_body(self):
+        r = self.web.post("/api/slots/1", data=b"", content_type="application/octet-stream")
+        self.assertEqual(r.status_code, 400)
+
+    def test_rejects_an_image_larger_than_a_slot(self):
+        r = self.web.post("/api/slots/1", data=b"a" * (128 * 1024),
+                          content_type="application/octet-stream")
+        self.assertEqual(r.status_code, 400)
+
+    def test_uploading_a_flash_image_switches_the_emulator_to_it(self):
+        r = self.web.post("/api/flash?name=mine.img", data=b"\xff" * (2 * 1024 * 1024),
+                          content_type="application/octet-stream")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(os.path.basename(self.holder.path), "mine.img")
+
+    def test_page_carries_the_slot_table(self):
+        html = self.web.get("/").get_data(as_text=True)
+        self.assertIn("slottable", html)
+        self.assertIn("/api/slots", html)
+
+class TestPageScriptParses(unittest.TestCase):
+    """The page's JavaScript has to be syntactically valid.
+
+    It is assembled by an f-string, so escaping mistakes are easy and invisible: one
+    bad backslash in a string literal makes the whole script fail to parse, and the
+    page then sits on "connecting..." forever while every endpoint still answers. That
+    is exactly what happened, and only a browser would have shown it -- so this checks
+    it here.
+    """
+
+    def setUp(self):
+        app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000)
+        app.config.update(TESTING=True)
+        self.html = app.test_client().get("/").get_data(as_text=True)
+
+    def test_the_script_is_one_block(self):
+        self.assertIn("<script>", self.html)
+        self.assertIn("</script>", self.html)
+
+    def test_the_script_parses_with_node_when_it_is_available(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        bodies = re.findall(r"<script>(.*?)</script>", self.html, re.S)
+        self.assertTrue(bodies, "the page has no script block")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write("\n;\n".join(bodies))
+            path = fh.name
+        try:
+            done = subprocess.run([node, "--check", path], capture_output=True,
+                                  text=True, timeout=60)
+            self.assertEqual(done.returncode, 0,
+                             "the page's script does not parse:\n" + done.stderr)
+        finally:
+            os.unlink(path)

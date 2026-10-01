@@ -47,10 +47,16 @@ class Qmp:
     """Minimal QMP client: connect, negotiate, send commands."""
 
     def __init__(self, path: str):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # A unix socket path on Linux, or "host:port": a Windows build of QEMU
+        # has no unix sockets, so the TCP form is the only way in there.
+        host, _, port = path.rpartition(":")
         try:
-            self.sock.connect(path)
-        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            if host and port.isdigit():
+                self.sock = socket.create_connection((host, int(port)), timeout=10)
+            else:
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.connect(path)
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
             raise SystemExit(
                 f"cannot reach the emulator at {path}: {exc}\n"
                 "Start it with sim/tools/run.sh first."

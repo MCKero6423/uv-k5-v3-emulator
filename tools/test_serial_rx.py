@@ -28,10 +28,13 @@ import sys
 import tempfile
 import time
 
+import uvk5_socket
+import uvk5_testenv
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-QEMU = os.path.expanduser("~/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm")
-ELF = os.path.expanduser("~/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf")
+QEMU = uvk5_testenv.qemu()
+ELF = uvk5_testenv.firmware()
 PRISTINE = os.path.join(ROOT, "assets", "pristine", "flash-pristine.img.gz")
 
 BOOT_SECONDS = 20
@@ -81,9 +84,11 @@ def parse_frames(buf: bytes):
 
 
 def main():
-    for path, what in ((QEMU, "QEMU"), (ELF, "firmware"), (PRISTINE, "pristine image")):
-        if not os.path.exists(path):
-            sys.exit(f"missing {what}: {path}")
+    for path, what in ((QEMU, "QEMU"), (ELF, "firmware"), (PRISTINE, "pristine flash image")):
+        if path is None or not os.path.exists(path):
+            print("SKIP: %s is missing (%s); see the README Quick start"
+                  % (what, path or "not found"))
+            return 0
 
     workdir = tempfile.mkdtemp(prefix="uvk5-serial-")
     image = os.path.join(workdir, "flash.img")
@@ -91,15 +96,16 @@ def main():
     with gzip.open(PRISTINE, "rb") as src, open(image, "wb") as dst:
         shutil.copyfileobj(src, dst)
 
-    # A listening socket for QEMU's serial chardev to connect back to.
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(sock_path)
-    srv.listen(1)
+    # A listening socket for QEMU's serial chardev to connect back to. Through
+    # uvk5_socket, so this is a unix socket where the platform has them and TCP where
+    # it does not -- a Windows QEMU cannot create a unix one, and this test is part of
+    # the verification path that has to work wherever the emulator does.
+    srv, serial_endpoint = uvk5_socket.listen("serial")
     srv.settimeout(40)
 
     proc = subprocess.Popen(
         [QEMU, "-M", f"uv-k5-v3,flash-image={image}", "-nographic", "-monitor", "none",
-         "-serial", f"unix:{sock_path}", "-kernel", ELF],
+         "-serial", serial_endpoint, "-kernel", ELF],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     failures = []

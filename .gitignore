@@ -22,3 +22,41 @@ build/
 # Python bytecode from the tools tests.
 __pycache__/
 *.pyc
+
+# Firmware is not ours to redistribute, and the localised builds in particular belong
+# to whoever made them. tools/fetch_firmware.py puts a release in assets/firmware/ on
+# request; nothing there is committed.
+assets/firmware/
+
+# The radio's EEPROM dump: settings and calibration from a real radio, which is not a
+# build artifact. The tests build their own images from assets/pristine/ instead.
+work/data.bin
+work/f4hwn/
+work/**/*.img
+work/**/*.bin
+work/**/*.elf
+work/**/*.uf2
+
+# Scratch output from a debugging session. The scripts stay: they document how this
+# machine is driven, and running one is how you reproduce what they describe.
+work/**/*.log
+work/**/*.png
+work/**/*.js
+work/**/*.tmp
+work/py*/
+work/serial_probe.py
+work/serial_write_probe.py
+work/qmp.py
+work/qmp_bridge.py
+
+# Junk that a Windows redirect created once: literal "%SystemDrive%" directories full
+# of cache databases. They were never meant to be here.
+%SystemDrive%/
+**/%SystemDrive%/
+# work/ is scratch -- images, logs, QEMU stderr, captures. The four scripts and the
+# README are the parts worth keeping, so whitelist those rather than trying to list
+# every extension a debugging session produces (a rule that missed one let four
+# QEMU stderr logs get staged).
+work/*
+!work/*.ps1
+!work/README.md
