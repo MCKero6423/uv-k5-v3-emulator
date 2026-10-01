@@ -941,6 +941,11 @@ def render_index(scale: int) -> str:
   #slottable button:hover {{ background:#343b44; }}
   .mini {{ margin-left:1em; }}
   .mini input {{ margin-left:0.5em; }}
+  /* The two tables made one long column; each folds, and the app list starts folded
+     because most of its sixteen rows are empty or hold something that is not an app. */
+  details.pane {{ margin:6px 0; }}
+  details.pane > summary {{ cursor:pointer; color:#c9d1d9; font-size:13px; padding:2px 0; }}
+  details.pane > summary:hover {{ color:#fff; }}
   #logtext {{ height:180px; min-height:180px; overflow-y:auto; margin:6px 0 0;
              padding:8px; background:#0d1117; border:1px solid #2d333b;
              border-radius:6px; white-space:pre-wrap; word-break:break-all;
@@ -965,17 +970,18 @@ def render_index(scale: int) -> str:
     <span id="fwstate">-</span>
     <span class="hint">or drop a .bin anywhere on the page</span>
   </div>
+  <details class="pane" open>
+  <summary>Firmware slots <span id="flashstate">-</span></summary>
   <div class="fwbar">
-    <label>Firmware slots</label>
-    <span id="flashstate">-</span>
     <label class="mini">flash image<input type="file" id="flashfile" accept=".img,.bin"></label>
     <span class="hint">the multi-system slots live in the external flash;
     write a .bin into one, then press Multiboot</span>
   </div>
   <table id="slottable"><tbody></tbody></table>
+  </details>
+  <details class="pane">
+  <summary>Overlay apps <span id="appstate">-</span></summary>
   <div class="fwbar">
-    <label>Overlay apps</label>
-    <span id="appstate">-</span>
     <button id="appask" title="ask the running firmware what it sees in each app slot">Ask the radio</button>
     <span class="hint">the Labs edition's apps live in the same external flash (16 slots
     from 0x102000; the firmware's menu lists the first eight, numbered 1..8). Pick a .app for a slot to
@@ -983,6 +989,7 @@ def render_index(scale: int) -> str:
     radio and MENU to run it</span>
   </div>
   <table id="apptable"><tbody></tbody></table>
+  </details>
   <div class="screenwrap" id="screenwrap">
     <img id="screen" src="/stream" alt="radio LCD"
          width="{128 * scale}" height="{64 * scale}">

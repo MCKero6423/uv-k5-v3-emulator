@@ -1153,6 +1153,14 @@ class TestAppsFrontEnd(unittest.TestCase):
     def test_the_page_says_where_the_apps_live(self):
         self.assertIn("0x102000", self.page)
 
+    def test_the_two_tables_fold_away(self):
+        """Sixteen app rows and five slot rows made the page one long column."""
+        self.assertIn("<details class=\"pane\"", self.page)
+        self.assertRegex(self.page, r"<summary>Overlay apps")
+        self.assertRegex(self.page, r"<summary>Firmware slots")
+        # the app list starts folded: most of its rows are not apps
+        self.assertIn("<details class=\"pane\">", self.page)
+        self.assertIn("<details class=\"pane\" open>", self.page)
     def test_the_page_never_asks_for_a_serial_port_or_audio(self):
         # WebSerial is how upstream installs these; here the image is edited directly, so
         # a permission prompt would be asking for something this page never uses.
