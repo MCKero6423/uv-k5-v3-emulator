@@ -942,7 +942,7 @@ def render_index(scale: int) -> str:
     <label>Overlay apps</label>
     <span id="appstate">-</span>
     <span class="hint">the Labs edition's apps live in the same external flash (16 slots
-    from 0x102000, the firmware's menu lists the first eight). Pick a .app for a slot to
+    from 0x102000; the firmware's menu lists the first eight, numbered 1..8). Pick a .app for a slot to
     install it — no serial port and no browser permission are involved</span>
   </div>
   <table id="apptable"><tbody></tbody></table>
@@ -1300,7 +1300,9 @@ async function loadApps() {{
         : s.state === 'empty' ? '<i>Empty</i>'
         : '<i>' + s.state + '</i> — not an app';
       const size = s.state === 'app' ? s.code_size + ' B' : '';
-      tr.innerHTML = '<td>app ' + s.slot + (s.slot < 8 ? '' : ' (after the menu)') +
+      // Upstream and the firmware's own menu number the eight usable slots 1..8, while the
+      // region has sixteen: slot 0 is "1" there, so show them the same way.
+      tr.innerHTML = '<td>app ' + (s.slot + 1) + (s.slot < 8 ? '' : ' (after the menu)') +
         '</td><td>' + what + '</td><td>' + size + '</td><td></td>';
       const td = tr.lastElementChild;
       const inp = document.createElement('input');

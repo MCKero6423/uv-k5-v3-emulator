@@ -589,6 +589,26 @@ Two things measured while wiring it up, both of which changed the code:
   differing bytes and read as "the install did nothing" -- the bytes were in the copy. Check
   `FlashSlot.path`, not the path you handed in.
 
+Upstream's side of this, read out of UVStudio's own `js/flash.js` rather than guessed:
+`MSG_APP_INFO 0x0730/0x0731`, `MSG_APP_ERASE 0x0732/0x0733`, `MSG_APP_WRITE 0x0734/0x0735`,
+`MSG_APP_VALIDATE 0x0736/0x0737` -- the same framing as the firmware slots, one family further
+along -- and the same constants this page uses (`APP_SLOT_COUNT 16`, `APP_IMG_OFFSET 0x1000`,
+`APP_HDR_SIZE 64`, `APP_MAGIC 0x31504146`). Two details from there are worth having: UVStudio
+uses only slots 0..7 and **labels them 1..8**, and it writes the header **last**, because the
+header carries the committed flag and a partial write must never validate. This page writes a
+whole slot at once, which has the same property for free.
+
+The firmware confirmed the whole thing itself. The Labs build answers `0x0730` (app info) over
+USART, so an installed `Beam.app` was queried on the radio, not just read back from the file:
+
+    0x0730 slot 0 -> status 0
+    raw 0000 | 46415031 01000101 4c040000 5860970d 0000 0108 | 4265616d 0000
+              FAP1   hdr1 abi1 api1  1100     CRC 0x0d976058  flags 0x0801  "Beam"
+
+That is the header this page installed, echoed by the running firmware, so the region, the
+offset, the layout and the bytes are right. Slots 1 and 2 answered `status 2` with unrelated
+data, which is the overlap the install guard exists for.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
