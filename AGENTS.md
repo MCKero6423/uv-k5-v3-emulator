@@ -430,6 +430,37 @@ Two lessons, both general:
   The right move was to ask what changed between those two runs, not to distrust the
   earlier note.
 
+### Moto/DFU: the entry is a build flag, not a key
+
+The factory bootloader in the first 10 KB does contain a Moto DFU handler at 38400 baud, and
+the emulator runs the bootloader correctly. It is nevertheless unreachable from outside, and
+the reason is in the bootloader's own code:
+
+    0x13f2  ldrb r0, [r4, #0]     ; r4 = 0x20000020, a byte in SRAM
+    0x13f4  cmp  r0, #1
+    0x13f6  beq  ...
+    0x13f8  cmp  r0, #2
+    0x13fa  beq  ...
+    0x13fc  cmp  r0, #3
+    0x13fe  bne  ...              ; anything else keeps waiting
+    0x140e  bl   0x06f0           ; only mode 3 gets here: the DFU handler
+
+SRAM survives a soft reset and a power cycle does not, so that byte can only be set by a
+program that then resets. In the application that is `overlay_FLASH_RebootToBootloader()`,
+reached from the serial command `0x05DD` **only when the build defines `ENABLE_OVERLAY`**;
+without it the same command is a plain `NVIC_SystemReset()`. Confirmed by sending `0x05DD` to
+a running radio: no `0x0518` follows, and the PC never leaves the application.
+
+Four ways in were ruled out by measurement, not by reading: PTT alone (the firmware's own
+`BOOT_GetMode()` needs a second key), PTT+SIDE1/SIDE2 and MENU (the application's special
+modes), a host byte inside the boot window including the `0x0530` handshake, and `0x05DD`.
+Run alone with no valid application the bootloader does not enter DFU either: it stops in one
+of the six self-branches at `0x080000dc`, which are hang slots, not a wait for input.
+
+The general lesson: when a firmware's mode is chosen from a byte in RAM, the trigger is not an
+input pin -- it is whatever wrote that byte before resetting. Find the writer in the source
+(`0x05DD` here) and the `#ifdef` around it, and you have the whole condition.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and

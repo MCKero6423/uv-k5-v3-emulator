@@ -381,6 +381,36 @@ slot and resets. Both halves are reachable from the page.
 - `tools/uvk5_slots.py` does the same offline: write a slot into a flash image, and print
   what each slot holds.
 
+### Moto/DFU flashing, and the flag this build does not set
+
+The factory bootloader is on the machine and it does speak the flashing protocol: a real
+`0x0518` / `0x0530` / `0x0519` exchange at 38400 baud, in the 10 KB before the application.
+What it will not do is enter that mode from the outside. Measured, not assumed:
+
+| an attempt at entering DFU | what actually happened |
+| --- | --- |
+| PTT held from reset | an ordinary boot. The firmware's own `BOOT_GetMode()` returns `BOOT_MODE_NORMAL` without a second key |
+| PTT+SIDE1, PTT+SIDE2, MENU | the application's special modes (F_LOCK, AIRCOPY, MULTIBOOT), never the bootloader |
+| a host byte during the boot window, `0x0530` included | ignored; the PC never leaves the application region |
+| the firmware's own `0x05DD` reset command | a plain reset, straight back into the application |
+
+The bootloader's decision is one byte: `ldrb r0,[r4]` with `r4 = 0x20000020`, compared against
+1, 2 and 3, where only **3** reaches the DFU handler. That byte is in SRAM, so it survives a
+*soft* reset and nothing else: the program already running has to write it and reset. In the
+firmware that is `overlay_FLASH_RebootToBootloader()`, and the `0x05DD` path takes it only when
+the build defines `ENABLE_OVERLAY`:
+
+    case 0x05DD: // reset
+        #if defined(ENABLE_OVERLAY)
+            overlay_FLASH_RebootToBootloader();
+        #else
+            NVIC_SystemReset();          <-- what this build does
+        #endif
+
+**So MOTO flashing is not waiting on the emulator.** The bootloader runs, its DFU handler is
+present, and the entry condition is known and reproducible; this build is simply not compiled
+with the one flag that reaches it. The multi-system release has the same property for the same
+reason -- compare the note the page prints for a build with no boot menu.
 The layout is the firmware's, from `App/driver/mb_flash.h`: slot 0 at `0x020000` backs up
 the internal image, slots 1..4 follow at `0x040000` in 128 KiB steps, the image starts one
 4 KiB sector into the slot, and the 64-byte header carries magic `FMB1`, the image size and

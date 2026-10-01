@@ -3595,12 +3595,32 @@ static void uvk5_arm_boot_key(UVK5MachineState *s)
     if (key == NULL || *key == '\0') {
         return;
     }
-    s->boot_key_ptt = (g_ascii_strcasecmp(key, "PTT") == 0);
-    if (s->boot_key_ptt) {
-        object_property_set_bool(OBJECT(&s->keypad), "ptt", true, &err);
-    } else {
-        object_property_set_str(OBJECT(&s->keypad), "press", key, &err);
+    /*
+     * "+" holds more than one: the firmware's own BOOT_GetMode() reads PTT and a
+     * matrix key, and returns F_LOCK for PTT+SIDE1, AIRCOPY for PTT+SIDE2 and
+     * RESCUE_OPS for PTT plus the key named by the SET_KEY setting. A boot key that
+     * can only be one of those cannot reproduce any of the special boot modes, which
+     * is what made the bootloader look unreachable from here.
+     */
+    char **parts = g_strsplit(key, "+", -1);
+    for (char **part = parts; part != NULL && *part != NULL; part++) {
+        const char *one = g_strstrip(*part);
+        if (*one == '\0') {
+            continue;
+        }
+        if (g_ascii_strcasecmp(one, "PTT") == 0) {
+            s->boot_key_ptt = true;
+            object_property_set_bool(OBJECT(&s->keypad), "ptt", true, &err);
+        } else {
+            object_property_set_str(OBJECT(&s->keypad), "press", one, &err);
+        }
+        if (err != NULL) {
+            error_report("boot-key: %s", error_get_pretty(err));
+            error_free(err);
+            err = NULL;
+        }
     }
+    g_strfreev(parts);
     if (err) {
         warn_report("boot-key %s: %s", key, error_get_pretty(err));
         error_free(err);
