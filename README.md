@@ -401,6 +401,28 @@ slot and resets. Both halves are reachable from the page.
 - `tools/uvk5_slots.py` does the same offline: write a slot into a flash image, and print
   what each slot holds.
 
+### Which build renders correctly, and how that is decided
+
+The page draws the display controller's **own memory**, not the firmware's framebuffer, so it
+does not need to know where a given build keeps its screen -- and `tools/panel_dump.py` shows
+the same thing from a shell, one character per pixel, so two builds can be diffed:
+
+    tools/panel_dump.py --qmp 127.0.0.1:4444                 # ASCII
+    tools/panel_dump.py --qmp 127.0.0.1:4444 --png shot.png  # scaled PNG
+
+That path is faithful for the builds measured here. Against its own framebuffer the 5.9.0.CN
+image agrees 8188 of 8192 pixels, and the fetched 6.0.0 build renders byte-identical to it.
+Both program the same panel registers -- `0xA1` segment reverse, `0xC0`, `0xA6`, columns
+0..127, start line 0 -- and that is the point: **the registers do not decide the mapping, the
+driver does**, because one driver compensates for the panel's segment order in software and
+another may not. So the mapping cannot be derived from the controller's settings; it has to be
+measured (`--mapping` exists for that).
+
+Two things the panel model does not yet honour, either of which will misplace pixels in a
+build that uses them: the **display start line** (`0x40|n`, a vertical scroll), and the
+controller's **132 columns** -- the model stores pixels at `col - 4` and wraps the column
+counter at 128, so a driver that addresses 4..131 loses its first four pixels and shifts the
+row. Both are on the list; neither affects the builds measured above.
 ### Moto/DFU flashing, and the flag this build does not set
 
 The factory bootloader is on the machine and it does speak the flashing protocol: a real
