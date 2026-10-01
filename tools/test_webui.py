@@ -10,7 +10,22 @@ import time
 import unittest
 
 import uvk5_image
-import webui
+# Flask is the one thing the fast suite needs from pip, so it is not always there.
+# A missing dependency is a skip with a reason, not a failure -- but at *module* level
+# raising SkipTest is reported as an error rather than a skip, so the check goes in
+# setUpModule(), which unittest treats as skipping the whole file.
+webui = None
+try:
+    import webui                              # noqa: F811
+except ImportError:
+    pass
+
+
+def setUpModule():
+    if webui is None:
+        raise unittest.SkipTest(
+            "the web UI tests need flask; install it with "
+            "pip install -r requirements-dev.txt")
 from uvk5_supervisor import FlashSlot
 
 

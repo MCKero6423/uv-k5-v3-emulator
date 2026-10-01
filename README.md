@@ -118,6 +118,25 @@ keypresses silently stop working. Run the test after touching that code;
        kept because they are quick to reach for, not because they are polished)
     harness/, stubs/, shim/, tests/   host build of the CW timing chain (stage A)
 
+### Running it elsewhere: CI and a container
+
+`.github/workflows/unit.yml` installs `requirements-dev.txt` (flask) and runs `tools/run_tests.sh -q`
+on every push and pull request:
+the `test_uvk5_*.py` unit tests plus `check_docs.py`, which need no emulator, no firmware and
+no QEMU build. That path is what keeps the suite honest on a machine that is not this one --
+before it existed, the runner's default paths were the author's, and a fresh clone could not
+run anything without editing it.
+
+`Dockerfile` builds a box with the same tooling, and can run the emulator tests if you give
+it a QEMU tree, because `tools/setup_qemu.sh` patches a tree rather than downloading one:
+
+    docker build -t uvk5 . && docker run --rm uvk5                  # unit tests
+    docker run --rm -v /path/to/qemu-7.2:/qemu-7.2 -e QEMU_SRC=/qemu-7.2 uvk5 \
+        bash -lc 'bash tools/setup_qemu.sh && bash tools/run_tests.sh'
+
+The `file:line` checks in `check_docs.py` need the firmware sources, which are not in this
+repository. Without them the checker skips those checks and says so; point `UVK5_FW_DIR` at
+a tree to have them run.
 ## What is not in this repository
 
 Two things are deliberately absent, and neither should be committed:

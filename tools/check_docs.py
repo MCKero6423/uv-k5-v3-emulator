@@ -36,7 +36,11 @@ SIM = pathlib.Path(__file__).resolve().parent.parent
 # Where the firmware sources are. Override when the tree is not at the default
 # path -- without that the checker cannot run anywhere but the machine it was
 # written on, and the file:line checks are the ones that catch drifting prose.
-FW = pathlib.Path(os.environ.get("UVK5_FW_DIR", "/root/uvk5-port/uvk5-sat/App"))
+# Firmware sources are not in this repository (see the README), so the default is a
+# sibling of this checkout and the checks that need the tree are skipped without it.
+# A fresh clone used to see thirteen failures it could do nothing about.
+_fw_env = os.environ.get("UVK5_FW_DIR")
+FW = pathlib.Path(_fw_env) if _fw_env else (SIM.parent / "uvk5-port" / "uvk5-sat" / "App")
 
 PAIRS = [
     ("README.md", "README.zh-CN.md"),
@@ -185,6 +189,11 @@ def check_documented_flags():
 
 def check_line_refs():
     print("firmware file:line references must point at what the docs claim")
+    if not FW.is_dir():
+        print(f"  SKIP  no firmware tree at {FW}; set UVK5_FW_DIR to check "
+              f"{len(LINE_REFS)} file:line references")
+        return
+
     for (name, line), needle in sorted(LINE_REFS.items()):
         path = resolve_fw(name)
         if path is None:

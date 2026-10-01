@@ -18,7 +18,10 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 SIM=$(dirname "$HERE")
-QEMU_SRC=${QEMU_SRC:-/root/qemu-build/qemu-7.2+dfsg}
+# A sibling of this checkout by default, which is where tools/setup_qemu.sh puts it.
+# The two defaults have to agree: they disagreed once, so a fresh clone rebuilt nothing
+# and reported a build that was not there.
+QEMU_SRC=${QEMU_SRC:-$SIM/../qemu-7.2}
 
 # One interpreter name, resolved once. This script used to spell $PY on every
 # line, which is a Windows problem (there is a python, not a python3) and a
@@ -26,7 +29,7 @@ QEMU_SRC=${QEMU_SRC:-/root/qemu-build/qemu-7.2+dfsg}
 # from a runner that passes, which is the failure mode this script exists to avoid.
 PY=${PYTHON:-}
 if [ -z "$PY" ]; then
-    for candidate in $PY python; do
+    for candidate in python3 python; do
         if command -v "$candidate" >/dev/null 2>&1; then PY=$candidate; break; fi
     done
 fi

@@ -13,24 +13,44 @@
 # about alignment, not interrupt semantics.
 set -u
 
-QEMU=${QEMU:-/root/qemu-build/qemu-7.2+dfsg/build/qemu-system-arm}
-ELF=${ELF:-/root/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf}
 HERE=$(cd "$(dirname "$0")" && pwd)
 SIM=$(dirname "$HERE")
 SRC="$SIM/qemu/py32f071.c"
-QSRC=/root/qemu-build/qemu-7.2+dfsg/hw/arm/py32f071.c
+
+# Same rules as the python tests (tools/uvk5_testenv.py): QEMU, GDB and ELF come from the
+# environment, then PATH, then the checkout -- and a missing one is a SKIP with a reason
+# rather than a failure. These were the author's home paths, which is why this was the one
+# test that could not run anywhere else.
+QEMU=${QEMU:-$(command -v qemu-system-arm || true)}
+GDB=${GDB:-$(command -v gdb-multiarch || command -v arm-none-eabi-gdb || true)}
+QEMU_SRC=${QEMU_SRC:-$SIM/../qemu-7.2}
+QSRC="$QEMU_SRC/hw/arm/py32f071.c"
+if [ -z "${ELF:-}" ]; then
+    for cand in "$SIM"/assets/firmware/*.elf "$SIM"/work/*.elf; do
+        [ -e "$cand" ] && ELF=$cand
+    done
+fi
+for t in "$QEMU" "$GDB" "${ELF:-}"; do
+    [ -n "$t" ] && [ -e "$t" ] || {
+        echo "SKIP  missing ${t:-a prerequisite} (set QEMU, GDB and ELF; see the README Quick start)"
+        exit 0
+    }
+done
+
+# QMP travels over a unix socket here and a Windows QEMU cannot create one: say so rather
+# than letting the launch fail and calling it a firmware problem.
+if ! python3 -c "import socket; socket.socket(socket.AF_UNIX)" 2>/dev/null; then
+    echo "SKIP  no unix sockets on this platform, so -qmp unix: is unavailable"
+    exit 0
+fi
 
 SEED=0x1248
 PORT=1259
 SOCK=/tmp/bk-readback.sock
 IMG=/tmp/bk-readback.img
 
-for t in "$QEMU" "$ELF"; do
-    [ -e "$t" ] || { echo "SKIP  missing $t"; exit 0; }
-done
-
 cp "$SRC" /tmp/bk-readback-orig.c
-trap 'cp /tmp/bk-readback-orig.c "$SRC"; cp "$SRC" "$QSRC" 2>/dev/null || true; rm -f "$IMG" "$SOCK"' EXIT
+trap 'cp /tmp/bk-readback-orig.c "$SRC"; [ -d "$QEMU_SRC/build" ] && cp "$SRC" "$QSRC" 2>/dev/null; rm -f "$IMG" "$SOCK" "$GDBFILE" 2>/dev/null' EXIT
 
 python3 - "$SRC" "$SEED" <<'PY'
 import sys
@@ -42,8 +62,10 @@ if needle not in s:
 open(src, "w", encoding="utf-8").write(s.replace(needle, f"{needle}\n    s->regs[0x0C] = {seed};", 1))
 PY
 
-cp "$SRC" "$QSRC"
-if (cd /root/qemu-build/qemu-7.2+dfsg/build && ninja qemu-system-arm 2>&1 \
+if [ -d "$QEMU_SRC/build" ]; then
+    cp "$SRC" "$QSRC"
+fi
+if [ -d "$QEMU_SRC/build" ] && (cd "$QEMU_SRC/build" && ninja qemu-system-arm 2>&1 \
         | grep -qE 'FAILED|error:'); then
     echo "FAIL  build error"
     exit 1
@@ -59,7 +81,8 @@ sleep 24
 
 # A command file, not a pile of -ex flags: a `commands` block cannot survive being
 # passed that way, and the failure looks exactly like "the firmware never read it".
-cat > /tmp/bk-readback.gdb <<GDB
+GDBFILE=$(mktemp)
+cat > "$GDBFILE" <<GDB
 set confirm off
 set pagination off
 set height 0
@@ -80,7 +103,7 @@ end
 continue
 GDB
 
-GOT=$(timeout 45 gdb-multiarch -batch -x /tmp/bk-readback.gdb "$ELF" 2>/dev/null \
+GOT=$(timeout 45 "$GDB" -batch -x "$GDBFILE" "$ELF" 2>/dev/null \
     | grep -oE 'GOT 0x[0-9A-Fa-f]{4}' | head -1)
 
 kill $QPID 2>/dev/null || true

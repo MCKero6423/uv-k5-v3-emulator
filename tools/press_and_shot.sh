@@ -7,7 +7,7 @@
 set -uo pipefail
 
 TOOLS="$(cd "$(dirname "$0")" && pwd)"
-OUT="${OUT:-/root/vm_screen.png}"
+OUT="${OUT:-$PWD/vm_screen.png}"
 HOLD="${HOLD:-3}"
 SETTLE="${SETTLE:-3}"
 

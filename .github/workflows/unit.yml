@@ -1,0 +1,24 @@
+name: unit tests
+
+# The fast half of tools/run_tests.sh: the test_uvk5_*.py unit tests plus check_docs.py.
+# It needs no emulator, no firmware and no QEMU build, so it runs on a bare runner --
+# which is the point. Before this existed, nothing ran on anyone else's machine, and the
+# suite quietly grew machine-specific defaults that a fresh clone could not satisfy.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: unit tests, and the docs against the code
+        run: bash tools/run_tests.sh -q

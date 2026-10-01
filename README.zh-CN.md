@@ -106,6 +106,22 @@ VFO 重算了状态。在真机上你只看到"什么都没发生"，在这里�
        留着是因为随手就能用，不是因为它们打磨过）
     harness/, stubs/, shim/, tests/   CW 时序链的宿主机构建（阶段 A）
 
+### 在别的机器上跑：CI 与容器
+
+`.github/workflows/unit.yml` 会安装 `requirements-dev.txt`（flask）并跑 `tools/run_tests.sh -q`：即
+`test_uvk5_*.py` 单元测试加上 `check_docs.py`，它们不需要模拟器、不需要固件、也不需要
+编译 QEMU。这条路才是让套件在**别人的机器**上保持诚实的东西——在它出现之前，runner 的默认
+路径是作者本人的，新克隆不先改文件就什么也跑不了。
+
+`Dockerfile` 构建同样的工具环境；若把 QEMU 源码树挂进去，还能跑模拟器测试（因为
+`tools/setup_qemu.sh` 是给已有源码树打补丁，而不是下载一份）：
+
+    docker build -t uvk5 . && docker run --rm uvk5                  # 单元测试
+    docker run --rm -v /path/to/qemu-7.2:/qemu-7.2 -e QEMU_SRC=/qemu-7.2 uvk5 \
+        bash -lc 'bash tools/setup_qemu.sh && bash tools/run_tests.sh'
+
+`check_docs.py` 里的 `file:line` 检查需要固件源码，而它不在本仓库里。没有它时检查器会**跳过**
+那部分并明确说明；把 `UVK5_FW_DIR` 指向一份源码树即可让它生效。
 ## 仓库里没有什么
 
 有两类东西是刻意不放的，也都不应该提交：

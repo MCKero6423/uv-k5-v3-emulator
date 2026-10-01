@@ -1,0 +1,3 @@
+# What the fast half of tools/run_tests.sh needs beyond the standard library.
+# The emulator half needs nothing from pip; it needs a QEMU build (tools/setup_qemu.sh).
+flask

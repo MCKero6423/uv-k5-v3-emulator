@@ -24,7 +24,14 @@ QMP_SOCKET = "/tmp/uvk5-qmp.sock"
 GPIOB_BASE = 0x50000400
 GPIO_IDR = 0x10
 GPIO_ODR = 0x14
-ELF = "/root/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf"
+ELF = os.environ.get("ELF") or os.environ.get("UVK5_FIRMWARE") or ""
+if not ELF:   # the same search order as tools/uvk5_testenv.py
+    import glob as _glob
+    for _pat in ("assets/firmware/*.elf", "work/*.elf"):
+        _hits = sorted(_glob.glob(str(pathlib.Path(__file__).resolve().parent.parent / _pat)))
+        if _hits:
+            ELF = _hits[0]
+            break
 
 
 class Qmp:

@@ -7,6 +7,7 @@ Short version: build it, run the tests, and do not commit firmware or radio data
     QEMU_SRC=~/src/qemu-7.2 bash tools/setup_qemu.sh   # patch a QEMU tree and build it
     python3 tools/fetch_firmware.py                    # a release image to run
     python3 tools/make_flash.py                        # the flash image it reads settings from
+    pip install -r requirements-dev.txt                # flask, for the web UI tests
     bash tools/run_tests.sh -q                         # fast; no emulator needed
     bash tools/run_tests.sh                            # everything; needs the tree above
 
@@ -24,7 +25,17 @@ works where the platform has unix sockets and TCP where it does not, and
 `tools/uvk5_testenv.py` finds a QEMU, a firmware and a gdb, skipping with a reason when
 one is absent. Use them rather than hardcoding a path or a socket family.
 
+## What runs automatically
+
+`.github/workflows/unit.yml` runs `tools/run_tests.sh -q` on every push and pull request --
+the unit tests and the documentation check, which need nothing but Python. If you add a
+test that needs an emulator, it belongs in the slow half of the runner, not here; if you
+add one that needs nothing, make sure it is picked up by the `-q` path so CI covers it.
+
+`Dockerfile` gives you the same environment locally.
+
 ## What not to commit
+
 
 - **Firmware of any kind**, including released images, localised builds and bootloader
   dumps. `tools/fetch_firmware.py` fetches what a test needs into `assets/firmware/`,
