@@ -342,12 +342,40 @@ def create_app(client, frame_addr: int = None, status_addr: int = None, scale: i
             body["panel_error"] = str(exc)
         return jsonify(body)
 
+    def running_firmware():
+        """What the device says it is running, which is not always what we asked for.
+
+        The page knows the image it was given, and that is a different question. With the
+        multi-system release, a committed external slot plus a valid state marker makes the
+        factory bootloader reflash the internal flash from that slot on every power-on, so
+        the uploaded image is overwritten before it runs and the page keeps naming a file
+        the radio never executed. The firmware prints its own banner on USART1, which the
+        page already collects, so it is read back from there (tools/uvk5_banner.py) -- and
+        only called a mismatch when the running version is not in the uploaded image at
+        all, because a file called f4hwn.fusion.bin legitimately reports v6.0.0.CN.
+        """
+        import uvk5_banner
+        try:
+            banner = uvk5_banner.latest(entry.get("text", "") for entry in log.entries(since=0))
+        except Exception:
+            return None
+        if not banner:
+            return None
+        path = image.current.path if image is not None and image.current else None
+        matches = uvk5_banner.image_mentions(path, banner)
+        note = None
+        if not matches:
+            note = ("the device reports %s, which is not in the image we asked it to boot: "
+                    "the bootloader most likely restored the internal flash from an "
+                    "external slot first" % banner)
+        return {"banner": banner, "matches_uploaded": matches, "note": note}
+
     @app.get("/api/firmware")
     def api_firmware():
         info = firmware_info()
         if info is not None and image is not None:
             info = dict(info, multiboot=image_has_multiboot(image.path))
-        return jsonify(loaded=info is not None, firmware=info)
+        return jsonify(loaded=info is not None, firmware=info, running=running_firmware())
 
     @app.post("/api/firmware")
     def api_firmware_upload():
@@ -1215,6 +1243,12 @@ document.addEventListener('drop', (e) => {{
 function fwLabel(fw) {{
   let s = fw.name + ' (' + fw.kind + ')';
   if (fw.multiboot === false) s += ' - no multi-system menu';
+  // What the device *says* it is running, which is not always the file we handed it:
+  // a committed external slot makes the bootloader reflash the radio first.
+  if (fw.running && fw.running.banner) {{
+    s += ' | device reports: ' + fw.running.banner;
+    if (fw.running.matches_uploaded === false) s += '  <-- NOT this image';
+  }}
   return s;
 }}
 async function pollFirmware() {{

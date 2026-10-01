@@ -218,32 +218,33 @@ class Supervisor:
         reached in about a second.
 
         Measured: with the pipe drained the launcher's QEMU accepts QMP in 0.5 s; with it
-        left unread, the same command line never answers at all. So: read in fixed-size
-        chunks (a readline() on a stream with no newlines hoards it), decode leniently, and
-        swallow anything the log throws -- a logging failure must not become a stopped
-        drain, which is a deadlock rather than a lost line.
+        left unread, the same command line never answers at all. So the drain starts here,
+        before anything waits on QEMU, and swallowing what the log throws -- a logging
+        failure must not become a stopped drain, which is a deadlock rather than a lost
+        line. It reads lines, for the reason the drain below records.
         """
         stream = getattr(proc, "stderr", None)
         if stream is None:
             return False
 
         def drain():
-            while True:
-                try:
-                    chunk = stream.read(65536)
-                except Exception:
-                    return
-                if not chunk:
-                    return
-                if self._log is None:
-                    continue
-                try:
-                    text = chunk.decode("utf-8", "replace")
-                    for line in text.splitlines():
-                        if line:
-                            self._log.add("qemu", line[:400])
-                except Exception:
-                    pass
+            # Line by line, through the log's own reader: it is what tags the model's
+            # SERIAL output and summarises binary lines, and it is the path the tests
+            # cover. Reading happens in the background from the moment QEMU starts,
+            # which is what keeps the pipe from filling -- a readline() still pulls
+            # whole chunks out of the pipe, it just does not *return* until it has a
+            # line, so a stream of binary without newlines is buffered, not stalled.
+            #
+            # The first version of this used a fixed 64 KB read() to avoid that
+            # buffering: it drained the pipe, so the deadlock stayed fixed, but nothing
+            # reached the log until 64 KB had accumulated -- and the banner naming the
+            # running firmware is forty bytes, so it never appeared at all.
+            if self._log is None:
+                return
+            try:
+                self._log.pump_stream(stream, default_source="qemu")
+            except Exception:
+                pass
 
         threading.Thread(target=drain, daemon=True).start()
         return True

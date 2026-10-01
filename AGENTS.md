@@ -526,6 +526,30 @@ The panel path needs none of this, and is what the page draws from: the controll
 memory is the screen for every firmware. The addresses only serve the guest-RAM
 fallback, which is why a failed search is reported and does not stop anything.
 
+### The page must report what the device says it is running
+
+The page knew only the file it had been handed, and those are different questions. A build
+called `f4hwn.fusion.bin` can report `EGZUMER+F4HWN v6.0.0.CN` -- that one does -- so
+"it still boots the CN version" was the page describing its input, not the radio. Worse,
+with the multi-system release a committed external slot plus a valid state marker makes the
+factory bootloader reflash the internal flash from that slot on every power-on: the uploaded
+image is overwritten before it runs, and the page keeps naming a file that never executed.
+
+The firmware answers the question itself. It prints `UV-K5 Firmware, ...` on USART1, the
+machine tags it SERIAL, and `tools/uvk5_banner.py` reads it back. `/api/firmware` now
+returns `running: {banner, matches_uploaded, note}` and the page shows `device reports: ...`,
+flagging it only when the running version is not in the uploaded image at all -- because a
+file name that differs from a banner usually just is a different name, and a hint that cries
+wolf gets ignored.
+
+Reading that banner back also exposed a bug of my own. It had stopped reaching the log
+entirely: `_start_stderr_pump` was rewritten to read the pipe in 64 KB chunks so QEMU could
+not block on it. That kept the deadlock fixed and silently lost the other half -- nothing
+arrived until 64 KB had accumulated, and the banner is forty bytes. It reads lines again,
+and still starts before anything waits on QEMU. **A rewrite that preserves the property you
+were fixing while losing another is the expensive kind**, and this one hid because the log
+still "worked" for the binary screen stream.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
