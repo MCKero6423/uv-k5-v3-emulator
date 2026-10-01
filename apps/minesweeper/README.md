@@ -44,3 +44,18 @@ that `APP_KEY_LEFT`/`APP_KEY_RIGHT` do not exist).
 Not verified: it has never been built for ARM or run on the radio, because no
 `arm-none-eabi-gcc` and no Docker exist on the machine it was written on. Treat the
 first build and the first run as the real review.
+
+## The host harness (how far verification got)
+
+`host_test.c` includes the app source and hands it a fake `app_api_t`, so the real state
+machine runs on the PC -- every string it draws is recorded and the lit pixels are counted:
+
+    gcc -std=gnu11 -O1 -Wall -Wextra -Werror -I.. -o host_test host_test.c && ./host_test
+
+Measured: a reveal/flag/new-game/digit/quit script returns normally, draws the title and the
+mine count, and lights pixels; a script that blindly reveals 85 cells reaches a terminal state
+eleven times, draws `BOOM`, and MENU starts a new game afterwards. The win path (`CLEAR`) was
+not reached by blind play, so it is the one branch this harness does not exercise.
+
+Still unverified: never built for ARM, never run on the radio -- no `arm-none-eabi-gcc` and no
+Docker where it was written. The first build and the first run are the real review.
