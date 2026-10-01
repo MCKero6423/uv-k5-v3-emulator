@@ -975,7 +975,9 @@ def render_index(scale: int) -> str:
   <div class="fwbar">
     <label class="mini">flash image<input type="file" id="flashfile" accept=".img,.bin"></label>
     <span class="hint">the multi-system slots live in the external flash;
-    write a .bin into one, then press Multiboot</span>
+    write a .bin into one, then press Multiboot. Edits go to a working copy of the image
+    (the file named above), so the one you loaded is never modified — and a restart keeps
+    that copy rather than reverting to the original</span>
   </div>
   <table id="slottable"><tbody></tbody></table>
   </details>

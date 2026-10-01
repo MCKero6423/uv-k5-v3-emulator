@@ -299,3 +299,23 @@ class TestRecoversFromAnExternalKill(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLauncherPrefersTheWorkingCopy(unittest.TestCase):
+    """A restart must not look like the page's installs vanished."""
+
+    def test_the_script_lists_the_working_copy_before_the_original(self):
+        import os as _os
+        path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "..", "work", "run-webui.ps1")
+        if not _os.path.exists(path):
+            self.skipTest("work/run-webui.ps1 is not in this checkout")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        # the working copy the page edits comes before the file it was first pointed at
+        working = text.find("work\\firmware\\flash-current.img")
+        original = text.find("work\\user-flash.img")
+        self.assertNotEqual(working, -1, "the working copy is not in the list")
+        self.assertNotEqual(original, -1)
+        self.assertLess(working, original,
+                        "a restart would fall back to the original image")

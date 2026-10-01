@@ -46,7 +46,12 @@ if ($Status) { $common += @('--status-addr', $Status) }
 
 if (-not $Kernel -and $env:ELF) { $Kernel = $env:ELF }
 if (-not $Flash) {
-    $candidates = @($env:UVK5_FLASH_IMAGE, 'work\user-flash.img', 'assets\flash.img')
+    # The page edits a working copy (webui copies the image before its first write, so a
+    # real calibration dump is never touched). Preferring it here means a restart keeps
+    # whatever was installed through the page, instead of silently falling back to the
+    # file it was first pointed at and looking like the install vanished.
+    $candidates = @($env:UVK5_FLASH_IMAGE, 'work\firmware\flash-current.img',
+                    'work\user-flash.img', 'assets\flash.img')
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) { $Flash = $candidate; break }
     }
