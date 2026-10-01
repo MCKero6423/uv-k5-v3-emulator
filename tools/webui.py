@@ -979,7 +979,8 @@ def render_index(scale: int) -> str:
     <button id="appask" title="ask the running firmware what it sees in each app slot">Ask the radio</button>
     <span class="hint">the Labs edition's apps live in the same external flash (16 slots
     from 0x102000; the firmware's menu lists the first eight, numbered 1..8). Pick a .app for a slot to
-    install it — no serial port and no browser permission are involved</span>
+    install it — no serial port and no browser permission are involved — then press F then 7 on the
+    radio and MENU to run it</span>
   </div>
   <table id="apptable"><tbody></tbody></table>
   <div class="screenwrap" id="screenwrap">
