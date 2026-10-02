@@ -2338,3 +2338,28 @@ attaching a debugger does not apply.
 Also this round: the Chinese note for round 56 is in, appended at the end of the file because the anchor the
 append script picks keeps landing on a fenced code block -- the same failure recorded in round 54. The heading
 counts still match, and the parity check passes.
+
+**Round 58: a write watchpoint names the writer, and it is the launcher's own memset -- 1200 times over.**
+
+Setting a hardware write watchpoint on 0x20000C0C -- overlay + 2444, the first byte that ends up wrong for the
+2568-byte app -- and reading the registers at every hit gives exactly one distinct writer:
+
+    PC=0x0801ae7a  LR=0x0801701c  fill=0x00  x1200
+      r0=0x20000280  r2=0x20001280  r3=0x20000c0c
+
+r0 is the overlay's base, r2 its end, and the instruction is a byte fill, so this is memset(ws, 0, 0x1000) --
+APP_LaunchOverlay's own zeroing of the 4 KiB overlay -- and it is called twelve hundred times inside the
+window. The launch path is being retried, over and over.
+
+That the only writer to that word is the zeroing is itself the important part, because the word ends up holding
+40 d6 01 08. Something therefore leaves it non-zero without any store the watchpoint saw, and the one way that
+happens is if the copy never covered it: the memset zeroes all 4096 bytes, the read fills code_size bytes, and if
+the read comes up about 124 bytes short the tail keeps its zeros and the CRC fails.
+
+That also reconciles round 56. The window probe there looked at one transfer -- the one that landed -- and that
+one carried the right bytes at 0, 1, 2444 and 2445. There are many transfers; the probe did not measure whether
+every attempt carries code_size bytes.
+
+So the next measurement is small and precise: log the count of every DMA run whose destination is the overlay,
+and see whether some of them are 124 bytes short of code_size. If they are, the whole picture closes -- short
+read, CRC failure, retry, and the app never runs -- and the fault is in whatever decides that count.
