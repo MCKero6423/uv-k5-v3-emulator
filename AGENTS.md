@@ -688,6 +688,28 @@ and the offset are all accepted. **Whether control then reaches the overlay is s
 probe samples every 100 ms and saw no overlay address, no `APP ERROR` screen appears, and the app does
 not draw. That is where this stands -- the pipeline is verified up to the load, not up to execution.
 
+**No overlay app actually runs in this emulator: the code is copied and control is never transferred.**
+Measured by polling the PC through QMP every 30 ms (finer than the model's own 100 ms probe), with the app
+installed through the page's own endpoint:
+
+* after launching Tetris, memory at 0x20000280 holds Tetris's own code byte for byte (f0b56b4c85b0036f...),
+  so the loader's copy is correct and aligned. The earlier claim in this session that it was shifted by a byte
+  was my own parsing dropping the first value, not the model. **172 PC samples over 4.5 s and 64 more over 2 s
+  were all inside firmware flash (0x08013260, a wait loop); not one landed in the 4 KiB overlay.**
+* a 16-byte app that calls nothing at all -- no display, no keys, no struct member, just a volatile counter in a
+  loop -- behaves the same way, so this is not about what an app does once it starts.
+* the header is not the reason either: Breakout's header (flags 0x1, capabilities 0x0, entry_off 0, abi 1,
+  api_min 1, hdr 1) is field-for-field the shape of ours, and the firmware still copies its code.
+
+So the failure is upstream of the app: the firmware validates and copies, and then does not enter the overlay.
+**This makes the earlier "Tetris runs, DOWN moves the piece" note stale -- per this file's own rule, treat it as
+unverified until it reproduces.** The screen seen after MENU (the radio's own top line, e.g. "F4 APRS", with the
+rest blank) is the main screen: the app menu has gone away without the app ever starting.
+
+Next instruments, in order: whether the firmware waits for a key release before jumping (the PC sits in the same
+wait loop at 0x08013260 both before and after MENU), and whether the copy of an upstream app is ever entered when
+it is launched from the radio's own menu path rather than through this page.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and

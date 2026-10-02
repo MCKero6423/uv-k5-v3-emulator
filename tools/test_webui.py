@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import uvk5_image
 # Flask is the one thing the fast suite needs from pip, so it is not always there.
@@ -1167,3 +1168,30 @@ class TestAppsFrontEnd(unittest.TestCase):
         self.assertNotIn("navigator.serial", self.page)
         self.assertNotIn("getUserMedia", self.page)
         self.assertNotIn("AudioContext", self.page)
+
+
+class TestWorkingCopyDirectory(unittest.TestCase):
+    """_edit_flash must create its working-copy directory, not assume it exists.
+
+    On the machine this was written on work/firmware/ already existed, so the missing
+    makedirs() was invisible; a fresh checkout (CI) fails with FileNotFoundError on the
+    first install. Found by the copilot/fix-github-actions-unit-job branch.
+    """
+
+    def test_the_working_copy_directory_is_created(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        flash = os.path.join(directory, "flash.img")
+        with open(flash, "wb") as fh:
+            fh.write(b"\xff" * (2 * 1024 * 1024))
+        slot = FlashSlot(flash)
+        missing = os.path.join(directory, "not", "created", "yet")
+        app = webui.create_app(None, frame_addr=0x1000, status_addr=0x2000, flash=slot)
+        with mock.patch.object(webui, "upload_dir", return_value=missing):
+            client = app.test_client()
+            import uvk5_apps
+            blob = uvk5_apps.build(b"\x01" * 32, "Beam", "1.0")
+            r = client.post("/api/apps/0", data=blob)
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True)[:200])
+        self.assertTrue(os.path.isdir(missing), "the working-copy directory was not created")
+        self.assertTrue(os.path.exists(os.path.join(missing, "flash-current.img")))
