@@ -2455,3 +2455,27 @@ value. Something on the load path, which knows code_size, writes a six-byte stru
 Next: watch those four bytes again, but ignore the memset and report only the first hit whose fill byte is not
 zero -- and if that is still the memset, watch a byte of the six that the memset does not clear, so the budget
 is not spent on it.
+
+**Round 63: the watchpoint saw only the memset and never a non-zero word -- and I left out the control that
+would have made that readable.**
+
+Watching the four bytes at 0x20000C0C and reading their value at every hit, rather than using the fill
+register -- which a byte copy would have fooled, as round 58 showed -- gives:
+
+    total hits 4000
+    distinct (pc, lr): PC=0x0801ae7a LR=0x0801701c  x4000
+    hits where the watched word was NON-ZERO: 0
+
+Four thousand hits in forty-odd seconds, every one of them the memset, and the word never read back non-zero.
+That is not a finding, because the same run never checked whether the overlay ended up corrupted at all. If
+the launch did not happen on this run -- the key sequence is timing-sensitive, and MENU is pressed by hand --
+then there was nothing to observe, and a probe that cannot show the thing it is looking for returns zero
+exactly as this file keeps warning.
+
+The fix is one line in the same run: after the watchpoint pass, read the overlay and report how many bytes
+match the app, so the corruption is proven present before any claim is made about its writer. Anything less
+cannot tell the writer was not the memset from nothing was written at all.
+
+Two smaller things are now known and worth keeping. The memset writes one byte per hit, so during a pass the
+watched word is transiently part-written; and reading memory at every hit costs a gdb round trip, which is why
+four thousand hits took most of the window. The next attempt should verify the corruption first, then watch.
