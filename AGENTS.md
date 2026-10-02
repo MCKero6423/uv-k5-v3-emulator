@@ -2941,3 +2941,29 @@ game's own arrays and its stack but not a great deal of it.
 Next cut, and it is the one round 16 attempted with the wrong instrument: split draw() into its three parts and
 run each with the metric that now works. The header block is font-free in NoFont, the 81-cell loop writes only
 to api->fb, and the cursor is a few bytes of arithmetic; whichever of them fails to return is the answer.
+
+**Round 86: size is ruled out -- a 3148-byte app paints -- and new_game() is the trigger.**
+
+The working 72-byte stripe app, padded with untouched volatile data in steps, run the same way each time:
+
+    code   80  PAINTED       code 1612  PAINTED
+    code  588  PAINTED       code 2124  PAINTED
+    code 1100  PAINTED       code 2380  PAINTED
+                             code 2636  PAINTED
+                             code 2892  PAINTED
+                             code 3148  PAINTED
+
+So the overlay runs apps of three kilobytes happily, and the size ladder that has been suspected since round 40
+is not the fault. Then the game's own material, added piece by piece to the same base:
+
+    new_game() only                        no paint
+    new_game() plus a rowcol loop          no paint
+    three new_game() calls                 no paint
+
+Every one of them is under three kilobytes and every one fails, while three-kilobyte padded apps pass. What they
+share is new_game(), and nothing else in this round does. That is also where round 68's old observation points:
+the app wrote its own globals in the first tenth of a second -- which is new_game() -- and then nothing further.
+
+The next step is small because new_game() is short: it sets a handful of counters, clears the three 81-cell
+arrays, and calls the mine placement. One of those statements is where control stops, and the same
+draw-a-marker-afterwards harness names it in as many runs as there are statements.
