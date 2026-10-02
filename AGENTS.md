@@ -1280,6 +1280,25 @@ exactly one loop: while (1) { if ((BK4819_ReadRegister(BK4819_REG_0C) & 1u) == 0
 The model keeps that register at 0x0000 -- its own comment says REG_0C bit 0 must stay clear because two places in
 app.c spin on it with no timeout, and it was fixed once already -- and reading the running emulator's reg0c over
 QOM confirms 0x0000 with bit 0 clear at every sample, before and after the launch. So that loop exits immediately
+
+**Round 48: the root cause, proved by arithmetic -- the overlay's CRC does not match, so the launcher returns APP_ERR_CRC.**
+
+Two numbers settle it. The header says code_crc32 0x3c12630d and the app's own code hashes to exactly that, so the
+app is not at fault. But the 2744 bytes that were actually sitting in the overlay -- read out of the running emulator
+with memsave -- hash to 0x1312d98c, which is not the header value. APP_LaunchOverlay computes MB_Crc32Bytes over
+that buffer and compares it with the header, so it takes the APP_ERR_CRC branch at line 1117 and returns before
+ever reaching entry(&app_api). That is why the app never runs, and why the code is nevertheless sitting in the
+overlay: the copy at line 1113 happened, the verification after it did not pass.
+
+Six bytes differ, at overlay offsets 2620, 2621, 2622, 2623, 2627 and 2650 -- address 0x20000CBC onwards. The app's
+code holds zero at every one of them; the overlay holds 40 d6 01 08 (a firmware address, 0x0801D640) and two
+single bytes. So something wrote a pointer into the tail of the overlay between the copy and the check, and a
+pointer that sits where the app had zeros is exactly what a stack frame or a global written by other code looks like.
+
+This also fits the warning the firmware's own app_api.h carries: the app executes from the RAM buffer that is also
+the PY25Q16 sector cache, and other things in the firmware use that RAM. The next step is to find what writes at
+0x20000CBC -- most likely an interrupt handler, which would make this a timing-dependent clobber rather than a
+deterministic one, and would explain why the size ladder once looked like a copy that finished late.
 and RADIO_SetupRegisters cannot be where the firmware stops. Round 46's conclusion is withdrawn.
 
 The marker test itself holds up. Decoding the blob shows sub sp, #4; ldr r0,[pc,#12]; ldr r1,[pc,#12]; str r1,[r0]
