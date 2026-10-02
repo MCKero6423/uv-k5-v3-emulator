@@ -3126,3 +3126,38 @@ arithmetic puts it at 33 (FIELD_Y 10 plus four rows of PITCH 6, minus one), so t
 offset somewhere between the app's coordinates and the reader's. It does not affect what the game draws -- both
 are the app's output -- but a reader that is nine rows off would mislead the next round, so it is written down
 rather than smoothed over.
+
+**Round 94: get_key() never delivers a key to a running overlay app -- measured seven ways.**
+
+The reveal inside the game did nothing, so the first suspect was the game's own loop, which asks get_key()
+once per frame and spends tens of seconds inside draw() before it does. Four MENU presses held five seconds
+each left the frame bit-identical (total ink 57, field ink 24, unchanged), which is what a missed key looks
+like -- and also what a key path that never runs looks like.
+
+So the next app asks the question directly. It polls api->get_key() in a tight loop and, the moment it gets
+anything other than APP_KEY_INVALID, paints that code as eight pixels on row 0 plus a marker pixel at (0,0).
+132 bytes, one entry, compile clean:
+
+    after launching            ink 526   (the launcher's own screen; the app has painted nothing)
+    MENU  held 5 s             ink 54    marker 0
+    DOWN  held 5 s             ink 54    marker 0
+    UP    held 5 s             ink 54    marker 0
+    STAR  held 5 s             ink 54    marker 0
+    1     held 5 s             ink 54    marker 0
+    F     held 5 s             ink 54    marker 0
+    EXIT  held 5 s             ink 54    marker 0
+
+Seven keys, five seconds each, and the marker never appears: api->get_key() does not hand a keypress to an
+overlay app. The marker exists precisely so that a genuine zero cannot be confused with nothing arriving, and
+it stays dark.
+
+That is where the goal stands, stated plainly. The blank screen is fixed and understood; the Labs firmware
+displays; the app's source, build script and page upload work, and it compiles with no diagnostics; it installs
+through the page, launches with F, 7, DOWN, MENU, and renders its own header, counter and cursor on the glass.
+What is not demonstrated is playable input, and the reason is now a named service rather than the app:
+get_key() returns APP_KEY_INVALID to an overlay app whatever is pressed. The game's own logic is not
+implicated -- its MENU branch is place_mines, reveal, check_win, and it has never been reached.
+
+The next honest step is therefore on the firmware side of the boundary this project keeps to: find how the
+loader wires api->get_key() and whether the resident keypad state it reads is the one the machine injects
+into, without editing the firmware to make the emulator work.
