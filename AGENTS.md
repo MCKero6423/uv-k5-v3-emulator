@@ -1202,6 +1202,28 @@ seconds, 28416 of them pixel data, so the panel path is being driven exactly as 
 instrument is sound. Comparing the two cases puts the fault in one narrow place: uvk5_supervisor.py builds
 QEMU's environment as dict(os.environ), which does inherit, yet the page's own emulator never sees the
 variable, so it is lost between the shell that starts the page and the server process it becomes. The fix is
+
+**Round 38: a hand-run can carry the whole measurement, and the panel probe has a cap of its own.**
+
+Round 37's discovery pays off: a hand-started emulator against the page's working image boots and draws, so
+the measurement no longer needs the page at all. This run used a copy of the working image and left the page
+untouched and healthy (485). It also needed no key tooling beyond tools/key.py and its QMP client.
+
+Two of my own call signatures were wrong and are worth writing down. uvk5_apps.install takes (image: bytearray,
+slot: int, blob: bytes, force) -- it edits the image in memory and reads the blob itself -- so passing a path
+string is read as a blob and fails with "only 53 bytes" or "the image is too small for slot 0" depending on
+which argument landed where. And key.py's Qmp wants a bare host:port: with the tcp: prefix getaddrinfo fails,
+which is the very trap this file records in the socket section, hit again by its own author.
+
+The useful find is about the instrument. The panel probe stops after 40000 transfers (panel_probe_n < 40000 in
+st7565_xfer), and a hand-run reaches that within about forty seconds of boot: the log ended at exactly 40000
+lines while keys were still going in, with the last eight thousand almost all byte 00. So a launch measured
+after that point would have looked like an app that sends nothing at all -- the same shape of mistake this file
+already records twice under capping a diagnostic before knowing the shape of the data. The cap has to go up (or
+become a knob) before the app measurement can be believed.
+
+Next: raise the cap, rebuild qemu-system-arm (stopping the page's job first, since it holds the binary), restart
+the page, and run the launch again on a hand-copy with the probe watching.
 to pass it the way the other launcher options are passed rather than relying on inheritance.
 
 Two corrections to this file, both of which have been costing time. The probe prints s->selected, not the raw
