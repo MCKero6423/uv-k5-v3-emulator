@@ -2697,3 +2697,29 @@ The next measurement uses the model-side write probe built in round 67, aimed at
 0x20001342. Watching which PC stores there while the no-font app runs says whether the app writes the
 framebuffer at all, and whether the writing PC is inside the overlay or somewhere else -- which separates
 "the app never got there" from "the app is running and its writes are landing in the wrong place".
+
+**Round 74: the RAM probe is not transparent -- aimed at the framebuffer it stops the radio drawing at all.**
+
+Two runs of the same image, same keys, one environment variable apart:
+
+    UVK5_RAM_PROBE unset        boot ink 485, F 7 DOWN 526, MENU 43      normal
+    UVK5_RAM_PROBE=0x20001342   boot ink 0, and 0 for everything after
+
+So the write probe built in round 67 changes the guest's behaviour. Only one store was ever logged through it, at
+boot, which means it is not merely observing -- it is breaking the firmware's access to those eight bytes.
+
+That matters beyond this round. Rounds 67 and 68 both ran with the probe active, so their runs were made under
+an instrument that perturbs what it measures, and the conclusions drawn from them have to be re-checked. Round
+68's reading is probably still sound, because the probe was then aimed at 0x20000C0C rather than the framebuffer
+and the PC it logged, 0x20000280, is inside the overlay with a value that matches the bytes actually seen -- but
+"probably" is the strongest word available until the probe is re-run with a control.
+
+The same A/B run also produced something useful, and free: with the probe off, the no-font variant reproduces
+the failure cleanly -- 485, then 526 once the menu row is selected, then 43 after MENU and nothing further. So
+rounds 72 and 73's conclusions about what does and does not end a large app stand on their own; it was only the
+instrument used to look at them that cannot be trusted yet.
+
+The probe's likely fault is its shape rather than its idea: an io region overlapped over RAM wins for those
+bytes, and an access the region cannot serve -- a wider or differently aligned one than its valid range allows
+-- is a guest error rather than a forwarding. Fixing that is the next step, and it needs the same A/B as its
+acceptance test: with the probe on, the radio must still boot to 485 and the game must still reach 43.
