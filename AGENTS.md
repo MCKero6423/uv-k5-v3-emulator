@@ -2637,3 +2637,33 @@ gFrameBuffer in the firmware's RAM, and tools/uvk5_buffers.py finds it by matchi
 Watching that RAM while the 44-byte app runs says whether its fill lands there at all. If it does, the app runs
 and its blit does not reach the controller; if it does not, the app never reaches the fill, and the question
 returns to the loader and the entry point.
+
+**Round 72: with the launch row finally correct, a 44-byte app fills the framebuffer and repaints the panel --
+and Minesweeper still does not.**
+
+Two things had to be separated first, and both were my own mistakes.
+
+The menu does not start on the row that launches an app. Mark in slot 1 with F, 7, DOWN, MENU runs and the
+panel changes 485 to 525; the same app in slot 1 with F, 7, MENU never appears. So one DOWN is what selects
+the row, and my earlier attempts to reach slot 2 with a second DOWN were landing on the empty row below it --
+which is why fillff appeared to do nothing in rounds 70-71. That test was invalid, and the conclusion drawn
+from it (that this is not about the font, and round 17 is unverified) has to be re-derived.
+
+With the sequence right:
+
+    Mark, 24 B, slot 1, F 7 DOWN MENU    -> marker 0xDEADBEEF appears, panel 485 -> 525
+    fillff, 44 B, slot 1, same keys      -> framebuffer 1024/1024 bytes 0xFF, panel 485 -> 525 -> 939
+    Minesweeper, 2568 B, slot 1, same     -> panel 526 -> 43 and nothing further
+
+So the loader, the entry point, the api pointer, api->fb and blit_full all work, and an app that fills the
+framebuffer and blits genuinely repaints the glass. Ink 939 rather than 8192 is the panel model storing a bit
+per pixel, not a partial frame.
+
+Put beside the earlier measurements the shape is sharper than the old size ladder: a small app that draws
+works, a large app that does not draw works (the 3028-byte pad-and-spin in round 47), and a large app that
+draws through the firmware -- Minesweeper, with print_tiny and display_clear -- does not. Neither size alone
+nor drawing alone explains it.
+
+The next measurement is therefore a single change on a working base: strip the print_tiny calls out of
+Minesweeper's draw() and render it with framebuffer writes only. If it paints, the firmware's font path is
+what ends a large app, and the fix is to draw without it -- which also makes the game playable.
