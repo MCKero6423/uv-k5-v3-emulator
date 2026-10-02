@@ -3055,3 +3055,47 @@ wrote minutes ago needs the same scepticism as one written rounds ago.
 Next measurement, and it is designed to be unarguable: have the app write the count itself into a few bytes of
 the framebuffer as bits -- 11 bits of n, in known positions -- and read them straight out of the panel hex.
 No bar, no width, no decode: the number is on the glass or it is not.
+
+**Rounds 91-92: the framebuffer is page-major, the game draws, and the page now says so.**
+
+Round 91 settled the contradiction by putting the number on the glass instead of in a bar: the app writes
+the framebuffer's non-zero byte count as eleven pixels on row 0 and a marker pixel at (0,0), then blits.
+
+    after MENU ink 52, marker pixel 0, all eleven bits 0, n = 0
+
+n = 0 -- draw() leaves the framebuffer empty -- and the app's own marker did not appear either. That ruled out
+the bar's width as the explanation and pointed at api->fb itself, so the next thing was to read the API's own
+documentation rather than reason about it. app_api.h:71 says it in one line:
+
+    /* The framebuffer is the resident gFrameBuffer[FRAME_LINES][128]; the app draws
+     * into it and calls a blit_* to push it to the LCD. */
+    typedef uint8_t (*app_fb_t)[128];
+
+gFrameBuffer is 1024 bytes, which is eight pages of 128 -- so fb's first index is the PAGE, not the pixel row,
+and the pixel within a page is a bit:
+
+    A->fb[y >> 3][x] |= (uint8_t)(1u << (y & 7));
+
+The app had been writing fb[y][x] with y up to 63, eight times past the end of the buffer, and the round 89
+"fix" from bit-packed to one byte per pixel moved it from wrong to differently wrong. Both helpers are now
+page-major and the arithmetic is the API's own.
+
+The frame then arrives, and the ASCII reader makes it readable for the first time -- this is the game's header,
+drawn by print_tiny at y=1:
+
+     0|...........................................#########################################......
+     1|..........................................##...#.#.#.#.#.#.#.#.######.##..##..###..##.....
+     2|..........................................##.###.#.#.#.#.#.#...#####.#.#.#.#.#.#.####.....
+     6|...........................................#########################################......
+
+Rows 7 and below are empty, and that is correct rather than a fault: every cell of a fresh game is closed and
+unflagged, so draw()'s 81-cell loop has nothing to paint. What is on the glass is the title, the counter and the
+cursor, which is exactly the opening frame of the game.
+
+Two habits from this round, both already in the file. When a contradictory measurement appears, make the next
+one unarguable -- eleven pixels of a number cannot be misread as a width. And when a type is in doubt, read the
+header that defines it and uses it: the answer was in a comment two lines above the typedef, and rounds 89 to 91
+were spent inferring what the compiler could have been told.
+
+Next: press MENU inside the running game and watch the field appear, which is the last thing standing between
+this and playable.
