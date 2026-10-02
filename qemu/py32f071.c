@@ -808,13 +808,13 @@ static uint8_t st7565_xfer(void *opaque, uint8_t out)
 {
     ST7565State *s = opaque;
     /* Diagnostic probe (UVK5_PANEL_PROBE): what the driver actually tells the
-     * controller, bounded to the first few hundred bytes. Two firmware builds that
+     * controller, bounded, but high enough that a boot plus a launch is not cut off (2000000 transfers; the old value, 40000, was reached about forty seconds after boot, so anything measured after a launch was invisible). Two firmware builds that
      * disagree about the column offset or the scan direction render differently, and
      * this is how that is measured rather than guessed. */
     {
         const char *panel_probe = g_getenv("UVK5_PANEL_PROBE");
         static unsigned panel_probe_n;
-        if (panel_probe && panel_probe_n < 40000) {
+        if (panel_probe && panel_probe_n < 2000000) {
             FILE *f = fopen(panel_probe, "a");
             if (f) {
                 fprintf(f, "PANEL a0=%d cs=%d page=%d col=%d byte=%02x\n",

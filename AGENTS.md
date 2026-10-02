@@ -1211,6 +1211,29 @@ untouched and healthy (485). It also needed no key tooling beyond tools/key.py a
 
 Two of my own call signatures were wrong and are worth writing down. uvk5_apps.install takes (image: bytearray,
 slot: int, blob: bytes, force) -- it edits the image in memory and reads the blob itself -- so passing a path
+
+**Round 39: an overlay app's blits DO reach the panel -- the probe's own cap was hiding them.**
+
+With the cap raised (40000 transfers was reached about forty seconds after boot, so everything after a launch
+was invisible) and QEMU rebuilt, a hand-run on my own copy of the working image answered the question. The
+toggling app -- fill 0xFF and blit, fill 0x00 and blit, forever -- was installed into slot 0 through
+uvk5_apps.install with its real signature (image: bytearray, slot, blob, force), the keys F, 7, DOWN, MENU were
+pressed over QMP, and the panel probe grew from 22568 lines to 139404.
+
+The reading is unambiguous. Of the 116836 lines after the keys, 114028 are pixel data, and the longest
+consecutive run of byte 00 is 108273 transfers -- about 105 full-screen writes in a row, with a byte histogram
+of 111061 zeros against 68 for the longest run of 0xFF. A hundred consecutive full-screen fills is not a
+launcher repainting once; it is a loop, i.e. the app running and blitting.
+
+That retires the conclusion this file has carried since round 32, that the app's calls do nothing. They do
+something, and what hid it was the 40000-transfer cap: the instrument went blind forty seconds after boot and
+the blindness was read as an app that never acted. It is the third instance in this file of capping a
+diagnostic before knowing the shape of the data, and the first one where the cap was inside the model rather
+than in a host tool.
+
+One thing is still open and is the next measurement: the 0xFF phase does not appear (68 bytes at most), only
+the zeros. Either the app never gets to fill 0xFF, or the firmware repaints over it immediately. An app that
+fills 0xFF only -- no zeros at all -- separates those two in one run.
 string is read as a blob and fails with "only 53 bytes" or "the image is too small for slot 0" depending on
 which argument landed where. And key.py's Qmp wants a bare host:port: with the tcp: prefix getaddrinfo fails,
 which is the very trap this file records in the socket section, hit again by its own author.
