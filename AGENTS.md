@@ -2967,3 +2967,34 @@ the app wrote its own globals in the first tenth of a second -- which is new_gam
 The next step is small because new_game() is short: it sets a handful of counters, clears the three 81-cell
 arrays, and calls the mine placement. One of those statements is where control stops, and the same
 draw-a-marker-afterwards harness names it in as many runs as there are statements.
+
+**Round 87: new_game()'s twelve statements are innocent -- and the harness that blamed them was faulty.**
+
+new_game() turned out to be twelve trivial statements: zero three 11-byte bit arrays (BYTES is ((81+7)/8) = 11)
+and set six counters. Nothing in it can hang. Translating exactly those statements into an app that shares
+nothing with the game's source -- 60 bytes, crc32 0x85397B54 -- paints: boot 485, then 491 after MENU. So the
+statements are not the fault and the failure travels with the game's source as a whole.
+
+Then the harness itself. Every variant in rounds 85 and 86 renamed the game's app_main to game_main and appended
+a probe of its own, and both carry the entry attribute:
+
+    306 * Upstream's app.ld pins it with KEEP(*(.text.entry)) ...
+    309 __attribute__((section(".text.entry"), used))
+    310 static void game_main(const app_api_t *api)      <- the game's own main, renamed
+    385 __attribute__((section(".text.entry"), used))
+    386 void app_main(const app_api_t *api)             <- the probe
+
+The linker script keeps both -- KEEP(*(.text.entry)) -- and nothing decides which one lands at offset 0, which
+is where the loader jumps. So those variants may have run the game's real main instead of the probe, and their
+"draw() never returned" readings cannot be trusted. That is the same class of mistake this file keeps
+recording: an instrument nobody checked, reporting a confident answer.
+
+The real Minesweeper.app has exactly one entry, so its own failure stands: it paints nothing over three minutes
+while MsStripes and MsClearStripes paint, and NoFont -- the same game with every print_tiny routed to a no-op --
+behaves like the full game rather than like a working app.
+
+Two things follow for the next round. The bisect has to be rebuilt so the probe is the only entry: either insert
+the marker at the end of the game's own draw(), or strip the entry attribute from the renamed function as well as
+renaming it. And the tooling limit is worth writing down: under ziglang, -Wl,-Map is refused like --defsym,
+objdump -h prints nothing, and nm returns no symbols, so the layout has to come from the build itself --
+pack_app.py's code size plus the loader's own behaviour -- rather than from a map file.
