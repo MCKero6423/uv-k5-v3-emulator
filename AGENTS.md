@@ -2385,3 +2385,23 @@ several rounds: short apps survive the race, long ones do not, and the reason wa
 
 Next: identify what zeroes the overlay a hundred times a second. The memset itself is at 0x0801ae7a and its
 caller returns to 0x0801701c, so the caller is one function away from being named.
+
+**Round 60: the memset's caller is a routine near 0x08016ff0, and it passes a computed pointer, not a literal.**
+
+Decoding around the return address 0x0801701c puts the call inside a function whose prologue is at 0x08016ff0
+(push, then sub sp, #0x6c). The literal pool near it holds 0x20001b40 through 0x20002811 and 0x2000000d/0x2000000e
+-- RAM addresses in the settings and EEPROM area -- and 0x20000280, the overlay base, appears nowhere in it. So
+the pointer handed to memset is computed rather than loaded, which is what PY25Q16_OverlayBuffer() looks like.
+
+My own disassembler misaligned badly here: it printed nonsense branch targets like 0x8741e36, which is the tell
+that the halfwords are not being paired the way the Thumb-2 encoding requires. The two facts above survive that
+because they rest on the prologue shape and on the literal values themselves, but no instruction-level claim from
+this round should be trusted until the decoder is fixed or a real ARM disassembler is available.
+
+What round 59 established still stands and is the part that matters: the overlay is zeroed about a hundred times
+a second while the code is loaded once, so nothing the loader writes can survive. That is consistent with the
+24-byte marker app running and Minesweeper not, and it means the retry loop, not the copy, is what to explain.
+
+The next measurement needs no disassembler: at the 1200 hits the stack pointer is 0x20003c50, so reading the
+words above it gives the whole return-address chain and therefore who calls the routine that calls memset. One
+run of that names the retry loop.
