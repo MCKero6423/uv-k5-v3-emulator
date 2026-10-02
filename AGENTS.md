@@ -3161,3 +3161,42 @@ implicated -- its MENU branch is place_mines, reveal, check_win, and it has neve
 The next honest step is therefore on the firmware side of the boundary this project keeps to: find how the
 loader wires api->get_key() and whether the resident keypad state it reads is the one the machine injects
 into, without editing the firmware to make the emulator work.
+
+**Round 95: the key path, mapped end to end -- and the matrix scan's stability rule is the suspect.**
+
+The firmware's own sources are in the repo as work/dl_*.c, so the chain can be read rather than inferred:
+
+    app_get_key()                 work/fw_app_overlay.c:85   what api->get_key points at (line 1025)
+      K5VIEWER_ParseInput()       line 90, under ENABLE_FEAT_F4HWN_K5VIEWER
+      KEYBOARD_GetKey()           work/dl_App_driver_keyboard.c:283
+        KEYBOARD_Poll()           line 185
+
+That already rules one thing in and one thing out. In: the overlay path does poll the matrix on demand --
+KEYBOARD_Poll scans the five columns itself -- so the app does not depend on the resident main loop running to
+see a key. Out: the serial-injection branch at the top of KEYBOARD_Poll only short-circuits when gKeyFromSerial is
+set, and the emulator injects keys through the matrix, so it is not what stands in the way.
+
+The serial hypothesis was worth testing because app_get_key calls K5VIEWER_ParseInput before polling, and the
+hand-started emulators in this session never had a serial port. Run with one present and drained: the marker
+still never appears, so that is not it either. (The client attached four seconds in and drained zero bytes, which
+is the trap this file already records -- a serial client that connects after boot misses the one-shot banner.)
+
+What is left is the scan's own stability rule, and it is unusually strict:
+
+    reg = 0;
+    for (k = 0; k < 8; k++) {
+        SYSTICK_DelayUs(10);
+        reg2 = read_rows();
+        if (reg2 != reg) match_count = 0; else match_count++;
+        if (match_count >= 2) break;
+    }
+    if (match_count < 2) continue;      /* this column is treated as having no key */
+
+Three consecutive identical reads, each separated by a ten-microsecond delay. If that delay does not actually
+wait on the overlay path -- because it is tick- or interrupt-based and the app runs with interrupts in a
+different state -- then the rows never settle, match_count never reaches two, every column is skipped, and no
+key is ever detected. That single mechanism would explain both halves of what has been measured for twenty
+rounds: an app that looks dead to the key path, and a key that never arrives.
+
+It is also cheap to settle from the model side without touching the firmware: watch the keypad's column and row
+GPIO traffic while an overlay app polls, and see whether the reads are stable or churning.
