@@ -3315,7 +3315,7 @@ struct PY32F071State {
     bool ram_probe_active;
     /* Base address of the write probe and its own backing store for those bytes. */
     uint32_t ram_probe_base;
-    uint8_t ram_probe_buf[8];
+    uint8_t ram_probe_buf[1024];
     /* An address space over `container`, so DMA sees the same map as the CPU. */
     AddressSpace dma_as;
 };
@@ -3438,6 +3438,8 @@ static void py32_ram_probe_write(void *opaque, hwaddr addr, uint64_t value, unsi
 
     if (addr + size <= sizeof(s->ram_probe_buf)) {
         memcpy(&s->ram_probe_buf[addr], &value, size);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR, "py32-ram-probe: write 0x%" HWADDR_PRIx " +%u out of range\n", addr, size);
     }
 }
 
@@ -3461,15 +3463,25 @@ static uint64_t py32_ram_probe_read(void *opaque, hwaddr addr, unsigned size)
      */
     if (addr + size <= sizeof(s->ram_probe_buf)) {
         memcpy(&value, &s->ram_probe_buf[addr], size);
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR, "py32-ram-probe: read 0x%" HWADDR_PRIx " +%u out of range\n", addr, size);
     }
     return value;
 }
 
+/*
+ * The size limits matter. With an eight-byte region and max_access_size 8, aiming the
+ * probe at gFrameBuffer made the radio stop drawing entirely: the display path reaches
+ * that buffer with accesses the region could not serve, and an access that does not fit
+ * is a guest error rather than a forwarding. A kilobyte of region is enough for anything
+ * the firmware does to a buffer, and a guest access is served by copying it whole.
+ */
 static const MemoryRegionOps py32_ram_probe_ops = {
     .read = py32_ram_probe_read,
     .write = py32_ram_probe_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .valid = { .min_access_size = 1, .max_access_size = 1024 },
+    .impl = { .min_access_size = 1, .max_access_size = 1024 },
 };
 
 static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
@@ -3509,15 +3521,30 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
      */
     const char *probe = g_getenv("UVK5_RAM_PROBE");
     if (probe && *probe) {
-        uint32_t at = (uint32_t)strtoul(probe, NULL, 0);
+        uint32_t want = (uint32_t)strtoul(probe, NULL, 0);
+        /*
+         * A memory region's alignment is its size, and the offset a subregion is added
+         * at must respect it. Asking for 0x20001342 with an eight-byte probe therefore
+         * placed the region at 0x20001340 and watched the wrong bytes, silently; aimed
+         * at the framebuffer it covered something the display path needed and the radio
+         * stopped drawing. Align the request down and say so.
+         */
+        uint32_t at = want & ~(uint32_t)(sizeof(s->ram_probe_buf) - 1);
 
-        if (at >= PY32_SRAM_BASE && at + 8 <= PY32_SRAM_BASE + PY32_SRAM_SIZE) {
+        if (at != want) {
+            fprintf(stderr, "UVK5_RAM_PROBE=0x%08x is not aligned to the %u-byte probe; "
+                            "watching 0x%08x instead\n",
+                    want, (unsigned)sizeof(s->ram_probe_buf), at);
+        }
+
+        if (at >= PY32_SRAM_BASE && at + sizeof(s->ram_probe_buf) <= PY32_SRAM_BASE + PY32_SRAM_SIZE) {
             memory_region_init_io(&s->ram_probe, obj, &py32_ram_probe_ops, s,
-                                  "py32f071.ram-probe", 8);
+                                  "py32f071.ram-probe", sizeof(s->ram_probe_buf));
             memory_region_add_subregion_overlap(&s->container, at, &s->ram_probe, 1);
             s->ram_probe_base = at;
             s->ram_probe_active = true;
-            fprintf(stderr, "RAM probe watching 8 bytes at 0x%08x\n", at);
+            fprintf(stderr, "RAM probe watching %u bytes at 0x%08x\n",
+                    (unsigned)sizeof(s->ram_probe_buf), at);
         } else {
             fprintf(stderr, "UVK5_RAM_PROBE=0x%08x is outside SRAM; probe disabled\n", at);
         }

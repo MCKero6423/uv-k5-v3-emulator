@@ -2749,3 +2749,29 @@ and could not make.
 One more thing the three runs show, and it is worth having: at 0x20000C0C the only writer across a whole launch
 is the memset at 0x0801ae7a, eight times. The app's own stores that round 68 saw at 0x20000280 came from the
 game, which is not the app installed in this image, so the two runs agree rather than conflict.
+
+**Rounds 76-77: a memory region's alignment is its size, and the probe had been watching the wrong bytes.**
+
+Widening the probe to a kilobyte did not stop it blanking the radio, which ruled out access width. The cause
+was alignment: a memory region's alignment is its size, and the offset a subregion is added at must respect it.
+Asking for eight bytes at 0x20000C0C placed the region at 0x20000C08 -- it was watching the wrong four bytes and
+saying nothing. Aimed at 0x20001342 it landed on 0x20001340 for an eight-byte probe, and on 0x20001000 for the
+kilobyte one, covering whatever the display path needed there. The radio stopped drawing, and the instrument
+had been quietly misreporting its own address the whole time.
+
+Aligning the request down and warning when it has to fixes it. The acceptance test is the one from round 74:
+
+    probe off              boot 485, F 7 DOWN 526, MENU 43
+    probe 0x20001342       boot 485, and 10378 stores logged
+    UVK5_RAM_PROBE=0x20001342 is not aligned to the 1024-byte probe; watching 0x20001000 instead
+
+The radio boots normally with the probe active, so the instrument is finally transparent where it is aimed.
+
+Its first log answers round 74's question directly. Every writer of that kilobyte during a whole run -- boot,
+menu, launch -- is in firmware flash: 0x08004874 and 0x08004d34 with 1041 each, the memset at 0x0801ae7a with
+1311, 0x0801af42 with 543, 0x08003cfe with 764, and a handful of others. Not one is inside the overlay, so the
+app never writes the framebuffer at all.
+
+One thing to fix before the next use: ten thousand fprintf lines in half a minute is too chatty, and the run ended
+with the QMP connection dying partway. A cap, or a filter on the program counter, is needed -- and the same rule
+as always applies: cap it against a shape already known, which this log now provides.
