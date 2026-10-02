@@ -941,6 +941,28 @@ comes back with it -- the key path is a plausible place for the firmware to reac
 the font reads that print_tiny provokes do not kill the app, so this is specific to the key path rather
 than to flash reads in general.
 
+**Round 20: the key-path conclusion is contradicted, and the probes' own failure is unexplained.**
+
+Round 15 measured get_key() repeated in an app loop at 27.1% -- the same as the control -- so calling it
+every pass is not what kills an overlay app, and the previous section's reading of the two key probes as
+evidence for that is wrong. Four probe builds (with and without an opening spin, with a short and with a
+2M-iteration per-pass spin) all left the panel byte-identical: 26 lit pixels on row 2 and a constant row-20
+pattern, which is the launcher's screen, drawn before the app is entered. So the probes did not run, and why
+is not established.
+
+What that failure is not: it is not the shape that other apps survived in, it is not get_key, and it is not
+the framebuffer writes -- an app in the same slot that fills every framebuffer byte through api->fb and
+blits does paint (43 -> 596 non-zero bytes). The probes differ from it in that they zero the framebuffer and
+then draw with a helper of their own before blitting, which is exactly the sort of difference that has to be
+isolated one change at a time rather than reasoned about, which is the discipline this file keeps preaching
+and which the probes ignored.
+
+Where the goal stands: the blank screen is fixed and understood; the Labs firmware displays; the app builds,
+installs through the page, runs, and paints a complete frame (title, counters and field all legible); the
+docs are bilingual and every step is committed and pushed. Input is the one item left, and it is not yet
+narrowed to a call -- a key press ends the running game, which is the part that is measured, and the probes
+meant to read the raw key codes never painted.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
