@@ -2916,3 +2916,28 @@ The next cut separates exactly those two, and it is small: a variant that calls 
 then fills stripes and blits. If the stripes appear, draw() returned and its output is what the driver skips; if
 they do not appear, draw() never came back, and the search moves inside it -- which is where round 17 left it,
 measuring that a frame costs tens of seconds in font reads.
+
+**Round 85: the game's draw() does not return, and it is not the font.**
+
+Two runs with the launch sequence known to work, and the panel read the way rounds 81 to 84 calibrated it --
+a frame that reaches the glass moves the number, and a black frame correctly does not.
+
+    MsDraw1 (2772 B): new_game(), draw(), then a stripe fill and blit
+        boot 485, menu 526, MENU -> 43 and 43 for the next 120 seconds
+        No stripes, so the marker never ran: draw() never returned.
+
+    NoFont (2392 B): the same game with every print_tiny routed to a no-op
+        boot 485, menu 526, MENU -> 43 for 120 seconds, and DOWN, MENU, UP change nothing
+
+The first run says the game's own draw() is where control stops. The second says the font is not why: remove
+every print_tiny and it still never paints. That matters because round 73 drew the opposite conclusion from the
+same app, on a launch row that does not launch it.
+
+So the culprit is inside draw() but not the text: display_clear, the framebuffer writes, or blit_full. All three
+work in the small probes -- MsClear clears correctly and MsClearStripes clears and paints -- so what differs is
+scale. The app runs from the 4096-byte overlay, and MsDraw1 is 2772 bytes of code there, leaving room for the
+game's own arrays and its stack but not a great deal of it.
+
+Next cut, and it is the one round 16 attempted with the wrong instrument: split draw() into its three parts and
+run each with the metric that now works. The header block is font-free in NoFont, the 81-cell loop writes only
+to api->fb, and the cursor is a few bytes of arithmetic; whichever of them fails to return is the answer.
