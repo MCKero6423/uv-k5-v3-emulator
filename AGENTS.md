@@ -2612,3 +2612,28 @@ Next: time one draw() from inside the app. The cheapest version is an app that c
 nothing else, then blits, and the panel says how long that took; round 17's equivalent measured about twenty
 seconds for a frame because of the firmware's font reads, so the question is whether this build is merely much
 slower than the polling window or stuck. A ten-minute watch of the same page would separate those two.
+
+**Rounds 70-71: a 44-byte app that only fills the framebuffer and blits never paints either -- the font is not the wall.**
+
+Built and installed through the page's own endpoints, with the source being fillff: fill the whole framebuffer
+with 0xFF, call blit_full once, then spin. No print_tiny, no firmware service, no font access at all:
+
+    install slot 2 -> FillFF 1.0, code_size 44
+    panel after power on:            ink 485
+    after F, 7, DOWN (row = slot 2): ink 587     the app menu
+    +1.5 s .. +21 s:                 ink 43      and no further change
+
+Ink 43 is the launcher's title box, not a framebuffer full of 0xFF (which would light about 8192 bytes). So the
+app does not get as far as its blit_full(); the wall sits between the launcher handing over the screen and the
+app painting the glass, which is exactly where rounds 16 to 21 kept arriving.
+
+That retires the font theory: forty-four bytes with no text and no service calls fail the same way as the
+2600-byte game. It also means round 17's positive result -- the game painting a complete frame after its delay
+was removed -- was measured on a different image and build, so by this file's own rule it is unverified until it
+reproduces, and it does not reproduce here.
+
+Next instrument, and it separates the two remaining possibilities cleanly: the framebuffer the app writes is
+gFrameBuffer in the firmware's RAM, and tools/uvk5_buffers.py finds it by matching the controller's memory.
+Watching that RAM while the 44-byte app runs says whether its fill lands there at all. If it does, the app runs
+and its blit does not reach the controller; if it does not, the app never reaches the fill, and the question
+returns to the loader and the entry point.
