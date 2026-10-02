@@ -710,6 +710,22 @@ Next instruments, in order: whether the firmware waits for a key release before 
 wait loop at 0x08013260 both before and after MENU), and whether the copy of an upstream app is ever entered when
 it is launched from the radio's own menu path rather than through this page.
 
+**Correction, same day: those PC measurements were taken on instances that never drew a screen, and the
+page's current firmware has no F+7 app menu at all.**
+
+Two things were wrong with the method above. First, every QEMU instance started by hand for these runs came up
+with a blank panel (0 lit pixels) while the page's own instance draws (803) -- the same image, a different
+firmware file. So "the PC never entered the overlay" was measured on a radio that never reached its main loop,
+and is **inconclusive**, not a finding. Second, driving the page's own /api/key and reading its /api/panel shows
+what the user sees: F, 7, DOWN x3 and MENU all answer ok and the screen does not change by a single pixel
+(ink 232 before and after every press). The page's firmware.bin is 109.3 KiB; the Labs build that does open the
+app menu is 111.9 KiB, i.e. a different build. The radio still answers 0x0730 with four committed apps, so it
+does support the app region -- it just has no F+7 entry, which is the Labs/UVStudio path.
+
+So the user-visible symptom ("cannot get into the program") is the key press doing nothing on this build, and
+the only way to test an overlay app is to run the Labs build itself. Measure through the page, not through a
+hand-started QEMU: it is the instance that draws, and its endpoints are the same ones the browser uses.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
