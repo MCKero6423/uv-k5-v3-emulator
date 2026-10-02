@@ -3369,3 +3369,35 @@ line that is deliberately driven.
 
 That is the next thing to read, and then to measure with a probe that samples the row lines while a column is
 actually selected rather than at a fixed call count, which is the correction round 99 wrote down.
+
+**Round 101: the model side is verified end to end, and every link is correct.**
+
+The last unread link is the GPIO model's input path, and it is right in all three parts.
+
+    static void py32_gpio_set_input(void *opaque, int line, int level)
+    {
+        if (line < 0 || line >= PY32_GPIO_PINS) return;
+        if (level) s->idr |= (1u << line); else s->idr &= ~(1u << line);
+    }
+
+    case GPIO_IDR:
+        /* outputs read back their own driven level; inputs read what the board drives */
+        out_mask = pins whose MODER field is 1;
+        return (s->odr & out_mask) | (s->idr & ~out_mask);
+
+and the reset values agree with the comment above them: moder = 0, every pin an input on reset, and
+idr = 0xffff, idle high, which is the active-low convention the keypad and the paddle contacts use.
+
+Put beside rounds 98 to 100, that completes the chain: the scan runs -- roughly 5600 full scans a second,
+derived from 1.68 million keypad_update_rows() calls in about a minute -- the columns are pulled low, the model
+connects a held key to its row only while that key's column is selected, and the firmware's read_rows() masks
+exactly the pins the board wires the rows to (PB12..15 against KEYPAD_ROW_PIN(r) = 15 - r).
+
+So on the model's side there is no link left to blame. The one remaining explanation is in the firmware's own
+consumer: what KEYBOARD_Poll does with the rows it reads, and whether its debounce rule -- three consecutive
+identical reads of a column before the key behind it is accepted -- is satisfied in the way an overlay app
+polls rather than the way the resident loop polls.
+
+That is where the next measurement has to look, and it has to look at the read side rather than the drive side:
+log what read_rows() returns, and whether the three-read stability test inside KEYBOARD_Poll is ever met, while
+an overlay app is the one polling.
