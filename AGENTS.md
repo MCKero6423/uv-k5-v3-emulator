@@ -2796,3 +2796,27 @@ because a game that draws without it is a game that runs.
 Worth noting what ink 43 is: the launcher's title box, the screen the firmware drew before entering the app. So
 the app does not repaint, and it also never takes the EXIT path back to the app menu -- the state is the one
 round 21 described, a launcher that has taken the screen and then never reaches the app.
+
+**Round 79: a four-row table isolates the failing pair -- display_clear() then blit_full().**
+
+Both calls, measured separately and together, all on the working launch base:
+
+| app | code | what it does | result |
+| --- | --- | --- | --- |
+| MsClear | 44 B | display_clear() once | framebuffer goes 525 -> 43 nonzero, the app survives |
+| fillff | 44 B | fills api->fb itself, then blit_full() once | paints: framebuffer 1024/1024 of 0xFF, panel 939 |
+| MsOnce | 48 B | display_clear() and blit_full() once each | panel falls to 43 and stays |
+| MsDraw | 52 B | both, every pass | panel falls to 43 and stays |
+
+MsClear is the informative one. The framebuffer it is responsible for goes from 525 non-zero bytes to 43, so
+display_clear() really ran, and the panel stays at 525 because nothing blitted -- which is correct behaviour
+for an app that only clears. So display_clear() alone is fine, and by round 72 a direct fill followed by
+blit_full() is fine too. Calling them one after the other is what fails, whether it happens once or in a loop.
+
+The specific difference is this: after a direct framebuffer fill, blit_full() repaints the panel; after
+display_clear(), it does not. That is a plain behavioural difference in the firmware and it is what all of the
+six-byte and CRC chasing of earlier rounds was standing on top of.
+
+One cell is still missing, and it separates the call from the act: replace display_clear() with the app's own
+memset of api->fb to zero and then blit. If that paints, the problem is the call itself and its side effects;
+if it does not, clearing and blitting in that order is the problem, and the game can be written to avoid it.
