@@ -2557,3 +2557,28 @@ With the probe working, the window shows the shape of the problem: the launch is
 and one byte is wrong 50 ms later. The probe logged 21 stores into those eight bytes -- eight from
 0x0801ae7a and eight from 0x08004874, both writing zero, plus five more that the summary cut off. Those
 five are the ones to read next: they are the only remaining candidates for the byte that changes.
+
+**Round 68: the six corrupt bytes are the app's own writes -- the app has been running all along.**
+
+Printing every store the probe logged, rather than the first sixteen, changes the picture completely:
+
+    RAMPW pc=20000280 off=0 val=0801d640 size=4      NON-ZERO
+    RAMPW pc=2000029e off=7 val=28 size=1            NON-ZERO
+
+The program counter of those stores is 0x20000280 and 0x2000029e -- inside the overlay. The app is writing
+them. And the values are exactly the six bytes that have been read as corruption for twenty rounds: the
+pointer 0x0801D640 and the byte 0x28. They are the app's own data, not damage.
+
+So the loader's CRC check passes, control reaches the app, and the app runs. Every measurement in the last
+twenty rounds that read the overlay back and hashed it was reading a live app's memory: the loader's copy is
+gone by then because the app has started using that space for its own variables. The "corruption" that
+explained the size ladder, the CRC failures and the many retries does not exist.
+
+That is this file's own rule again, in a form it had not taken before: a measurement must be able to show what
+it is looking for, and the contents of the overlay stop being the loader's output the moment the loader
+succeeds. The instrument to watch the load is the probe during the load -- which is what finally settled it.
+
+Where that leaves the work: the app loads, verifies and runs, so the open question is the earlier one -- what
+the app does after it starts -- and the round-17 finding stands as the last measured answer: it paints a
+complete frame, and a key press ends it. The next round should start from a running app and watch its
+behaviour, with no further attention to the overlay's contents.
