@@ -3266,3 +3266,44 @@ file always prescribes -- put the probe in the model, not the guest: count keypa
 what they compute, while an overlay app polls, and compare that with the same count while the resident loop
 polls. If the model is never asked, or is asked and answers the same in both cases, the difference is
 somewhere neither reading nor guessing has reached yet.
+
+**Round 98: the model is asked, the key is in the model, and the columns never move -- so the poll never scans.**
+
+The probe round 97 asked for is in the model now, env-gated by UVK5_KEYPAD_PROBE and printing every twentieth
+thousand keypad_update_rows() calls: the call count, which columns are high, and which cells are held.
+
+    KEYPADUPD calls=200      colhigh=0x1a pressed=0x00000     resident loop: a column is pulled low
+    KEYPADUPD calls=1599600  colhigh=0x1e pressed=0x01000     overlay app: every real column high
+
+Three things at once, and they settle the question that has been open for twenty rounds.
+
+The model is being asked -- 1.68 million calls in one run -- so the firmware is not simply sitting somewhere
+that never reaches it. The key is genuinely in the model: pressed=0x01000 is column 3, row 0, set by the
+injection the machine performs. And the columns never move while the app runs: colhigh=0x1e means every real
+column is high, at rest, where the resident loop shows 0x1a with one column pulled low.
+
+That last one is decisive because of what keypad_update_rows() does with it: a row goes low only when a held
+key sits on a column that is currently pulled low. Columns at rest, key in the model, and no row ever goes low
+-- so the firmware is not scanning. KEYBOARD_Poll's five-column loop body is not executing while an overlay app
+owns the foreground.
+
+And that loop has exactly one way out before it runs: the serial-injection branch at the top of KEYBOARD_Poll,
+
+    #ifdef ENABLE_FEAT_F4HWN_K5VIEWER
+    if (gKeyFromSerial != KEY_INVALID) { ...; return injected; }
+    #endif
+
+which returns only when gKeyFromSerial is set. The overlay loader's app_get_key calls K5VIEWER_ParseInput()
+immediately before polling, and that is the one thing the overlay path does that the resident loop does not do
+in the same place. So the reading is: something in the serial path leaves a key pending for the duration of the
+app, and every poll takes the early return.
+
+One operational lesson, paid for in this round: the probe at one line per 200 calls produced 450 KB of stderr,
+and the QMP client driving the test was cut off mid-phase. This file already says to drain the host's stderr --
+it is the drain that made the flood survivable enough to read -- but a probe's rate has to be chosen for the
+person reading it as well as for the thing measured. It is now one line per 20000 calls.
+
+Next: read K5VIEWER_ParseInput and the state it writes, and find why a pending serial key survives for the whole
+life of an overlay app. If the answer is that it only survives when there is nothing on the serial port at all,
+the hand-started emulators in this session were all in that state -- which is worth knowing but would not explain
+the page's own instance, and that distinction is the next thing to measure rather than assume.

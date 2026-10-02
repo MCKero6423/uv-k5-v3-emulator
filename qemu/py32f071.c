@@ -470,7 +470,23 @@ struct UVK5KeypadState {
 static void keypad_update_rows(UVK5KeypadState *s)
 {
     bool all_cols_high = true;
-
+    /* ROUND 98 PROBE: is the model asked at all, and what does it compute? */
+    {
+        static unsigned long calls = 0;
+        static bool probing = false, probed_env = false;
+        if (!probed_env) { probing = getenv("UVK5_KEYPAD_PROBE") != NULL; probed_env = true; }
+        calls++;
+        if (probing && (calls % 20000) == 0) {
+            unsigned cols = 0;
+            for (int pc = 0; pc < KEYPAD_COLS; pc++)
+                if (s->col_high[pc]) cols |= (1u << pc);
+            unsigned held = 0;
+            for (int pc = 0; pc < KEYPAD_COLS; pc++)
+                for (int pr = 0; pr < KEYPAD_ROWS; pr++)
+                    if (s->pressed[pc][pr]) held |= (1u << (pc * KEYPAD_ROWS + pr));
+            fprintf(stderr, "KEYPADUPD calls=%lu colhigh=0x%02x pressed=0x%05x\n", calls, cols, held);
+        }
+    }
     for (int c = 1; c < KEYPAD_COLS; c++) {
         if (!s->col_high[c]) {
             all_cols_high = false;
