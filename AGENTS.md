@@ -3200,3 +3200,38 @@ rounds: an app that looks dead to the key path, and a key that never arrives.
 
 It is also cheap to settle from the model side without touching the firmware: watch the keypad's column and row
 GPIO traffic while an overlay app polls, and see whether the reads are stable or churning.
+
+**Round 96: the keypad model is correct -- so the overlay path's key failure is above it.**
+
+The check round 95 asked for, done on the model side: read the keypad device in qemu/py32f071.c.
+
+It models the matrix properly. keypad_col_changed() records which column the firmware is currently pulling low
+and recomputes the four row lines; keypad_update_rows() sets a row low when a held key sits on a column that is
+currently low; side keys read low when every real column is high, which is how the driver samples them; and
+keypad_col_changed ignores line 0, matching a driver that never uses it. The column mapping agrees with the
+firmware's own PIN_COL(c - 1) (line 432 against App/driver/keyboard.c).
+
+It also carries a warning worth knowing about, because it describes this exact symptom: without volatile on
+row_out, GCC at -O2 proves every element is still NULL, notices qemu_set_irq() returns immediately on a NULL irq,
+and deletes keypad_update_rows() and its five callers -- so no row line is ever driven and the firmware's scan
+reads nothing. That failure is silent and looks like a broken keypad. The guard is present, verified from the
+object code.
+
+So the model is not where the key is lost, and that matters: it rules out the one alternative that would have
+been a model bug rather than a firmware-path behaviour.
+
+That leaves round 95's hypothesis, and it now accounts for every measurement in twenty rounds. KEYBOARD_Poll
+calls SYSTICK_DelayUs(10) for every column on every poll. If that delay does not return on the overlay path --
+because it waits on a tick or flag that only advances when interrupts are enabled, and the overlay runs with
+them in a different state -- then:
+
+  * MsKeys, which does nothing but call get_key() in a tight loop, is stuck inside the first poll and paints
+    nothing, which is exactly what it did;
+  * the game completes draw() (the end-of-draw marker was reached in rounds 88-89) and then calls get_key(),
+    hangs there, and leaves its last frame on the glass, which is exactly what it did -- header, counter and
+    cursor frozen, keys changing nothing.
+
+One mechanism, both halves. Next: read SYSTICK_DelayUs and the machine's SysTick counter model. If the counter
+advances on a QEMU timer regardless of interrupts, the hypothesis dies and something else in the poll is
+responsible; if the delay waits on an interrupt-driven flag, it is the answer and it is a model-side fix to make
+that flag observable to a program running with interrupts masked.
