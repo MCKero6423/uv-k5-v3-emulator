@@ -1220,6 +1220,24 @@ toggling app -- fill 0xFF and blit, fill 0x00 and blit, forever -- was installed
 uvk5_apps.install with its real signature (image: bytearray, slot, blob, force), the keys F, 7, DOWN, MENU were
 pressed over QMP, and the panel probe grew from 22568 lines to 139404.
 
+**Round 40: Minesweeper's own frame content does reach the panel, and what dominates the log is its per-frame clear.**
+
+Same pipeline as round 39 (hand-run on a copy of the working image, panel probe on, keys F, 7, DOWN, MENU over QMP),
+now with the real Minesweeper: 103370 pixel bytes after the keys, dominated by 00 (100418 transfers) with a
+longest run of 97640 -- about 95 full-screen clears -- and underneath it the app's own drawing bytes, 7f 287,
+41 234, 08 192, 40 174 and so on, which are its text and box characters. Since the app calls display_clear()
+once per frame, a full-screen clear followed by a few hundred bytes of glyphs is exactly the expected shape.
+So the app paints: the earlier "blank screen" is not a broken path.
+
+Also worth recording: the FillFF variant (fill 0xFF only, never fill zero) failed to build and the failure was
+mine. The build script is textual, and rewriting bigapp to fillff also rewrote the compiler's own -o argument
+and source names, so the compile produced nothing and elf2bin then reported a missing fillff.elf. Fix the script
+to substitute only the names it means to, or write the variant's script by hand.
+
+Next, and it needs no guessing: the model exposes the panel's own display RAM as the QOM property gram (see
+st7565_get_gram), so on a hand-run QMP can read the actual picture instead of inferring it from transfers.
+That answers "is the game on the glass" directly, and it is the last step between here and calling it playable.
+
 The reading is unambiguous. Of the 116836 lines after the keys, 114028 are pixel data, and the longest
 consecutive run of byte 00 is 108273 transfers -- about 105 full-screen writes in a row, with a byte histogram
 of 111061 zeros against 68 for the longest run of 0xFF. A hundred consecutive full-screen fills is not a
