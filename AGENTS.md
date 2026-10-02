@@ -2363,3 +2363,25 @@ every attempt carries code_size bytes.
 So the next measurement is small and precise: log the count of every DMA run whose destination is the overlay,
 and see whether some of them are 124 bytes short of code_size. If they are, the whole picture closes -- short
 read, CRC failure, retry, and the app never runs -- and the fault is in whatever decides that count.
+
+**Round 59: the read is not short -- the overlay is simply zeroed over and over, about a hundred times a second.**
+
+Logging every DMA run longer than 512 bytes with its destination and count, for twelve seconds after MENU, gives
+exactly one run whose destination is the overlay:
+
+    DMA tx=4 rx=3 count=2568 tx_addr=0x20001338 rx_addr=0x20000280 tx_inc=0 rx_inc=1
+
+2568 is code_size exactly, so round 58's short-read conclusion is withdrawn: the copy is complete and correct,
+as rounds 53 and 56 already showed from the byte side.
+
+The comparison that matters is with round 58's watchpoint. That word is written 1200 times in the same sort of
+window, every one of them by memset(0x20000280, 0, 0x1000), while the DMA writes the overlay only once. So the
+code is loaded once and the 4 KiB overlay is zeroed roughly a hundred times a second.
+
+That fits everything that was otherwise puzzling. The 24-byte marker app ran because its CRC window is 24 bytes
+and the check happens immediately after the load, so it passes; Minesweeper's window is 2568 bytes and is far
+more likely to be hit by one of those zeroings before the check. It also explains the size ladder that cost
+several rounds: short apps survive the race, long ones do not, and the reason was never the size as such.
+
+Next: identify what zeroes the overlay a hundred times a second. The memset itself is at 0x0801ae7a and its
+caller returns to 0x0801701c, so the caller is one function away from being named.
