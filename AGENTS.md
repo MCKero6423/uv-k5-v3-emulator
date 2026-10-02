@@ -1160,6 +1160,25 @@ compiled against a different layout, is wrong and is withdrawn. Reading the offs
 assembly confirms the calls are right as well: the member at offset 28 is print_tiny and the one at 8 is
 display_clear, exactly where this app's source expects them.
 
+**Round 33: the fill-and-blit probe does not reproduce, and one of my own readings has been lying to me.**
+
+The plan was to replicate round 17 exactly -- the 332-byte fill-every-byte-and-blit app in slot 0, launched
+with the page's default taps -- and read the panel before and after in one run. It did not reproduce. The
+readings went 485 (main screen) -> 580 after F and 7 -> 627 after MENU, and 627 then held for twenty seconds:
+the screen never left the app menu, so the app was never entered and this run says nothing about the app.
+
+The useful part is what that exposed. The values I have been reading as "the app painted" -- 537, 549, 552,
+580, 596, 617, 627 -- are one family: the app menu, whose ink moves with the highlighted row. A genuine
+all-lit panel would be about 1024 non-zero bytes and has never been observed, and the game's own frame in
+round 17 was a different signature entirely (390 non-zero bytes with ink 1275, legible in the dump). So at
+least one earlier "it painted" reading was a menu row, and every such claim in these notes should be read
+again against what the value actually is.
+
+What that leaves is narrower and better defined: the launch through synthetic keys is not reliable enough to
+carry a measurement, and the panel ink alone cannot tell a menu from an app. Both have to be fixed before the
+next attempt at the app itself: drive the launch with key.py's timing and verify the handover by the 43-byte
+launcher box, then judge the app only by a signature no menu can produce.
+
 That leaves the measurement those conclusions rested on in doubt. The claim was that draw() is never
 reached because the flash probe records no font read after the app's code load. But the session shows
 1446 reads of the font region early on, which is what caching the font in RAM looks like -- and if the
