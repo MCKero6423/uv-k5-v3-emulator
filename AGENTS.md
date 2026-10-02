@@ -808,6 +808,29 @@ nothing. So the launcher (or the fault path it takes) is wedged, not merely wait
 That is where the next round starts: the app dies within about 2 ms, the firmware never reads the flash after
 loading it, and what is left running is a tight loop in the firmware with no display or key activity.
 
+**The app-size ladder points the finger at an unfinished copy: the launcher jumps before the code is all there.**
+
+Sizes and outcomes, all measured on the page's own emulator with a 2 ms PC probe (UVK5_PC_PROBE_MS):
+
+| app | code | result |
+| --- | --- | --- |
+| Spin | 16 B | loops in the overlay forever |
+| Delay | 248 B | **still running 13 s later** (54 of the last 60 samples inside the overlay, at 0x20000348) |
+| Phases | 372 B | survives a bar plus blit plus led |
+| Ladder | 544 B | dies before it can draw anything |
+| Minesweeper | 2408 B, then 2428 B with an opening spin | dead within about 4 ms either way |
+
+An opening spin does not save the big apps, so this is not about how soon the first call is made. It is about
+**how much of the app has been copied**: the first few hundred bytes are executable and everything past them is
+not there yet when the app runs. That also explains the earlier surprise that Tetris's full 3300 bytes were
+present in the overlay when checked by hand afterwards -- the copy does finish, just after the app has been
+entered. The pattern is the same family as the four flash bugs already in this file: the loader is told the
+transfer is over while the guest is still feeding it, so it jumps early. The suspicion is the SPI/DMA busy and
+complete flags, and the check is to watch them during a large read rather than to reason about them.
+
+Workaround, for now and marked as one: a small app is a working app. The opening spin added to Minesweeper is
+kept out of the repository until the real cause is fixed, because it does not work anyway.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
