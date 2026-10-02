@@ -2820,3 +2820,27 @@ six-byte and CRC chasing of earlier rounds was standing on top of.
 One cell is still missing, and it separates the call from the act: replace display_clear() with the app's own
 memset of api->fb to zero and then blit. If that paints, the problem is the call itself and its side effects;
 if it does not, clearing and blitting in that order is the problem, and the game can be written to avoid it.
+
+**Round 80: the app runs and blits, and the panel stays at 43 -- the metric may be the thing that is wrong.**
+
+Zero the framebuffer with the app's own loop and blit once, which is the two effects MsDraw gets from
+display_clear() plus blit_full() without the call:
+
+    MsZero.app code 68 B, crc32 0x85057463
+    boot panel 485, framebuffer 485 nonzero
+    after F 7 DOWN panel 525, framebuffer 525 nonzero
+    after MENU  panel 43, framebuffer 0 nonzero, and it stays there
+
+The framebuffer going to zero is proof the app ran and its loop wrote where it meant to. The panel not
+changing is the puzzle, and fillff already answered half of it: filling with 0xFF and blitting takes the panel
+to 939. So a blit of 0xFF reaches the glass and a blit of 0x00 does not.
+
+The likely reason is ordinary driver behaviour: ST7565_BlitFullScreen need not send pages that are all zero,
+so a black frame sends nothing and the panel keeps whatever it had. That makes ink 43 a coincidence -- it is
+also the number of non-zero bytes in the launcher's title box -- and it means the metric has been lying about
+what these apps do. An app whose frame is black looks exactly like an app that never drew.
+
+That reinterpretation is cheap to test and it changes the shape of the remaining work. Fill the framebuffer
+with a pattern rather than a constant and blit: if the panel shows the pattern, the whole display path from an
+overlay app works, MsZero and MsOnce and MsDraw and the game have all been running, and what remains is the
+game's own drawing. If the panel stays at 43 even then, the driver is skipping more than zero pages.
