@@ -14,19 +14,35 @@ APP_API_MIN=1
 APP_VMA=${APP_VMA:-0x20000280}
 OUT="${APP_NAME// /}"
 
-CC=${CC:-arm-none-eabi-gcc}
-OBJCOPY=${OBJCOPY:-arm-none-eabi-objcopy}
-command -v "$CC" >/dev/null 2>&1 || {
-  echo "no $CC on PATH; install the Arm GNU Toolchain (arm-none-eabi) first" >&2; exit 2; }
+# Two routes, because only one of them was available where this was written:
+#   1. the Arm GNU Toolchain, which is what upstream's own build.sh expects
+#   2. Zig's bundled clang (pip install ziglang), which cross-compiles to
+#      thumb-freestanding-eabi and needs no arm-none-eabi-gcc at all
+ZIG=""
+if ! CC=${CC:-$(command -v arm-none-eabi-gcc 2>/dev/null)} || [ -z "$CC" ]; then
+  ZIG=${ZIG:-$(command -v zig 2>/dev/null || echo "python -m ziglang")}
+  CC="$ZIG cc"
+  echo "no arm-none-eabi-gcc; using $ZIG cc"
+fi
 
 CFLAGS="-mcpu=cortex-m0plus -mthumb -Os -std=gnu11 -ffreestanding -fno-builtin -fno-common \
   -fomit-frame-pointer -ffunction-sections -fdata-sections -Wall -Wextra"
-LDFLAGS="-nostdlib -nostartfiles -T app.ld -Wl,--defsym,APP_VMA=${APP_VMA} \
-  -Wl,--gc-sections -Wl,-Map=${APP}.map -Wl,--build-id=none"
+# Zig refuses --defsym, -Ttext and --section-start, so the VMA is resolved into a copy of
+# the linker script instead, and the entry is pinned by the section attribute the source
+# already carries (.text.entry, exactly as upstream's apps do).
+sed "s/APP_VMA *= *DEFINED(APP_VMA) *? *APP_VMA *: *0x[0-9A-Fa-f]*;/APP_VMA = ${APP_VMA};/" \
+    app.ld > app-resolved.ld
+LDFLAGS="-nostdlib -T app-resolved.ld -Wl,-e,app_main -Wl,--gc-sections -Wl,--build-id=none"
 
 rm -f ./*.app ./*.elf ./*.bin
-"$CC" $CFLAGS $LDFLAGS -o "${APP}.elf" "${APP}_app.c"
-"$OBJCOPY" -O binary "${APP}.elf" "${APP}.bin"
+# shellcheck disable=SC2086
+$CC $CFLAGS $LDFLAGS -o "${APP}.elf" "${APP}_app.c"
+# objcopy if there is one, otherwise the section-based extractor from this repository
+if command -v arm-none-eabi-objcopy >/dev/null 2>&1; then
+  arm-none-eabi-objcopy -O binary "${APP}.elf" "${APP}.bin"
+else
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../../../tools/elf2bin.py" "${APP}.elf" "${APP}.bin" --min "${APP_VMA}"
+fi
 python3 pack_app.py "${APP}.bin" "${OUT}.app" --name "$APP_NAME" --ver "$APP_VER" \
         --vma "$APP_VMA" --api-min "$APP_API_MIN"
 ls -l "${OUT}.app"

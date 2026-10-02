@@ -661,6 +661,33 @@ written back by its own write-back anyway. Rolling the image back is what worked
 its in-memory image back on exit, so an edit made while a guest was live can be overwritten by the
 copy that guest was holding -- which is also how the marker reappeared after being cleared.
 
+**Building an overlay app without the Arm toolchain: `pip install ziglang`.** There is no
+`arm-none-eabi-gcc` and no Docker on the machine this was written on, but Zig ships a C compiler
+that cross-compiles to `thumb-freestanding-eabi`, which is enough. What Zig refuses, each measured:
+`--defsym`, `-Ttext`, `--section-start` (its linker-argument whitelist) -- so the VMA is resolved
+into a copy of `app.ld` with `sed` instead; `-T` *is* forwarded, because a nonexistent script makes
+it error; and `--image-base` is accepted but useless here, because it page-aligns the segments
+(0x20000280 becomes LOADs at 0x200103C8 and 0x20020C94).
+
+Two traps cost the most time. **lld maps the ELF header and program-header table as a LOAD of its
+own** -- 52 + 4x32 = 180 bytes at the image base with no section content -- so `tools/elf2bin.py`
+extracts *allocated sections* rather than program headers; following the program headers starts the
+image at 0x20000000 and the loader refuses it with APP_ERR_VMA. And **one division pulled in
+`__aeabi_uidiv`**, which does not exist in a `-nostdlib` blob: the fix is to remove the divisions
+(repeated subtraction; `& 127` with a reject instead of `% 81`), not to link a soft-divide routine
+into a 4 KiB overlay.
+
+The entry must be first in the image, because the loader jumps to blob offset 0, so `app_main`
+carries the same `__attribute__((section(".text.entry"), used))` that upstream's apps use
+(`cube3d_app.c:183`).
+
+Measured with the result installed through the page: the firmware reads the slot header twice and then
+**exactly `code_size` bytes from slot + 0x1000** (2408 for Minesweeper's 2408-byte code, and it is
+the only read of that size in the whole boot log). So the blob's shape, its header, the CRC, the VMA
+and the offset are all accepted. **Whether control then reaches the overlay is still unproven**: the PC
+probe samples every 100 ms and saw no overlay address, no `APP ERROR` screen appears, and the app does
+not draw. That is where this stands -- the pipeline is verified up to the load, not up to execution.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
