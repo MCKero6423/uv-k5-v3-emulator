@@ -3552,3 +3552,33 @@ builds. Every reading taken here has been compared against the wrong file's keyp
 So the next step is not another probe but an identity check: establish what the binary under test actually is,
 by its banner and its size and CRC, and put it beside the source it was built from. Reading the right source is
 a cheaper fix than any of the twenty rounds spent reading the wrong one.
+
+**Round 108: the binary is the Labs build, so the source was right -- and my own guards hid the moment again.**
+
+The identity check round 107 asked for:
+
+    work/firmware/firmware.bin   111940 B   sha256 53b5b4fc6935b63a
+    banner                       UV-K5 Firmware, EGZUMER+F4HWN v6.0.0
+    first words                  SP=0x20004000  PC=0x08002d49
+
+111940 bytes is the Labs build this file describes as 111.9 KiB, the words are an application image linked for
+0x08002800, and the sources on hand -- dl_App_app_app.c at 77 KB and dl_App_driver_keyboard.c at 9 KB -- both
+carry the F4HWN and OVERLAY markers. So the suspicion that I had been reading a different build's keypad
+driver is not supported. The source is the right source.
+
+That leaves the column mystery, and this round also found why the last two probes kept missing it. Both had a
+guard that happened to exclude the moment being looked for. ROWSEENB printed the first five IDR reads of the
+keypad port, so odr = 0x00000004 is the value at those five reads and nothing more -- while the firmware's scan
+sets every column high and then pulls one low, so odr elsewhere should read 0x78 with one bit cleared. And
+COLSEL printed only while the model held a key, so the one column change that happens before any key is pressed
+went unrecorded and silence afterwards was read as "the columns never move".
+
+That is the same mistake in two instruments in two rounds, and it is worth naming plainly because this file
+already carries its general form: a probe must be able to show the thing it is looking for. "Only the first
+five" and "only while a key is held" each look like reasonable noise control, and each removes exactly the
+evidence required.
+
+So the next measurement is the unguarded one: log odr together with the held-key mask across a window in which
+a key is pressed, rather than at the first few reads or only when something is held. If odr's column bits move
+there, the model is being driven and the row rule has a different problem; if they never move at all, the
+running firmware really is not writing those pins, and the next step is to find what it writes instead.
