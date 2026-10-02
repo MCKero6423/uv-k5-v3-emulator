@@ -771,6 +771,25 @@ must gate the sector cache while an app is loaded, and **that gate is what the m
 Next: find the gate in the firmware's flash driver (a memory flag, a register, a GPIO) and check what the model
 answers for it. This is the first time the failure has a name and a reproducible three-app comparison behind it.
 
+**Correction: the sector-cache explanation is not supported by the log order.**
+
+The flash probe records every transaction in order, and the last one for that launch is the app's own
+code load (addr=103000 len=544, first bytes f0b583b0). Nothing follows it before the app is gone, so no
+font or resource read lands on top of the running app in that window -- the sector-cache overwrite cannot
+be the cause here. What the log does show is 7848 reads in the font region over the session, all of them
+part of the firmware's own repainting rather than the app's life.
+
+Where that leaves the search, with everything that is actually measured: the loader copies and jumps (a
+sample lands inside the overlay, and the 16-byte app that calls nothing loops there forever); the app then
+dies within well under 100 ms (panel reads at t+113 ms still show the menu and at t+193 ms the launcher's
+title box alone); an app that spins first survives a bar plus blit plus led and dies around delay_ms; and
+one that calls blit immediately is gone before anything of it can be seen. The killer is inside the first
+hundred milliseconds and is not a flash read.
+
+Next instrument, and it needs a one-line model change rather than more guessing: the PC probe ticks every
+100 ms, which is the same order as the app's whole life. Dropping that interval to a couple of milliseconds
+turns it into a real trace and would show where in the overlay the app stops.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
