@@ -1317,6 +1317,31 @@ there is exactly one, and it is correct in every field:
 
 2568 bytes, destination exactly the overlay at 0x20000280, receive address incrementing, both channels agreeing
 
+**Round 56: the transfer carries the correct bytes end to end -- the six bytes are written afterwards.**
+
+A window probe on the DMA loop, logging the byte the transfer actually carried at a few fixed indices, prints
+this at the end, for the run whose rx_addr is the overlay:
+
+    idx 0: transfer f0, app code f0  (correct)
+    idx 1: transfer b5, app code b5  (correct)
+    idx 2444: transfer 00, app code 00  (correct)
+    idx 2445: transfer 00, app code 00  (correct)
+
+Earlier lines in the same log are other, shorter runs -- many of them carrying 0xff or the FAP1 header bytes --
+so the load is not one clean transfer but a sequence, and the one that lands in the overlay carries the right
+bytes everywhere, including the window that ends up wrong. The DMA and flash paths are therefore exonerated for
+the last time, and whatever writes those six bytes does so after the transfer.
+
+That also opens the possibility this file should have considered earlier: if the overlay is correct at transfer
+time, the CRC check may pass, the app may actually run, and the six bytes may be a post-mortem symptom rather
+than the cause. The next measurement is to read the overlay back within a fraction of a second of MENU and
+hash it: correct then means the load and the verification passed.
+
+My own mistake this round is the mirror image of one this file already documents. The window probe was meant to
+write four lines and wrote 2088, because a condition on the loop index alone also matches every short transfer
+that happens to start there. The file warns about capping a diagnostic before knowing the shape of the data;
+this was the other direction -- flooding it -- and the same rule covers both.
+
 **Round 54: the flash model's own data is correct, and so is the DMA -- so the six bytes are written after the transfer.**
 
 The read path in the model is three lines and returns s->data[(s->addr++) % PY25Q16_SIZE], and the model keeps that

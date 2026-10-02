@@ -1973,6 +1973,9 @@ static void py32_dma_run_for_spi(PY32DmaState *s, PY32SpiState *spi)
         }
     }
 
+    const char *wp = g_getenv("UVK5_DMA_WINDOW");
+    uint32_t wi = 0;
+
     while (count > 0) {
         uint8_t out = 0xff;
 
@@ -1981,6 +1984,15 @@ static void py32_dma_run_for_spi(PY32DmaState *s, PY32SpiState *spi)
         }
 
         const uint8_t in = py32_spi_xfer_byte(spi, out);
+
+        /* Diagnostic (UVK5_DMA_WINDOW): the bytes this transfer actually carried, in the
+         * window where the overlay ends up wrong. Separates "the transfer wrote them"
+         * from "something wrote them afterwards". */
+        if (wp && (wi == 0u || wi == 1u || wi == 2444u || wi == 2445u || wi == (count - 1u))) {
+            FILE *f = fopen(wp, "a");
+            if (f) { fprintf(f, "idx=%u in=%02x rx=0x%08x\n", wi, in, rx_addr); fclose(f); }
+        }
+        wi++;
 
         if (rx >= 0) {
             address_space_write(as, rx_addr, MEMTXATTRS_UNSPECIFIED, &in, 1);
