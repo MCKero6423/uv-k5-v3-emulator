@@ -828,6 +828,27 @@ entered. The pattern is the same family as the four flash bugs already in this f
 transfer is over while the guest is still feeding it, so it jumps early. The suspicion is the SPI/DMA busy and
 complete flags, and the check is to watch them during a large read rather than to reason about them.
 
+**The size ladder was a red herring: a 3 KiB app that calls nothing -- and then print_tiny, get_key and
+display_clear in turn -- runs fine. Minesweeper is dying on its own code.**
+
+The ladder lumped two variables together: every small test app happened to spin first, and every big one
+called the firmware immediately. Separating them, all with the 2 ms PC probe on the page's own emulator:
+
+* a **3028-byte** app whose body is a volatile pad array and a spin loops in the overlay indefinitely (1704
+  samples, all inside its first 512 bytes) -- so blob size is not a problem;
+* adding a single **print_tiny** to it changes nothing (2039 samples, and 1024 font-region reads appear in the
+  flash log, the first at 0x1e0000) -- so the font path, and the sector-cache worry with it, is fine;
+* adding **get_key** as well: still running (2029 samples);
+* adding **display_clear** too: still running (1978 of 13195 samples, 15%, inside the app).
+
+So the three calls no surviving app had ever made are all harmless, and the surviving apps have covered the
+API surface Minesweeper uses. Its failure is in its own code. The next step is therefore an ordinary bisect:
+strip pieces out of its draw() until it survives, install each variant through the page and read the same
+trace. That is a much better place to be than the emulator mystery this started as.
+
+One measurement note: the flash probe's per-read lines were also the way the font read was spotted (1024 of
+them, none of which landed on the app), which is a useful control to keep running.
+
 Workaround, for now and marked as one: a small app is a working app. The opening spin added to Minesweeper is
 kept out of the repository until the real cause is fixed, because it does not work anyway.
 
