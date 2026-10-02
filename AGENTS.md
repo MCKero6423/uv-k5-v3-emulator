@@ -1194,6 +1194,22 @@ it took the page down. It was restored immediately as a managed background job a
 screen 485 -- and this time it is a job, so it will not be lost the same way.
 
 The instrument itself is fine. The running qemu-system-arm.exe contains UVK5_PANEL_PROBE and the literal
+
+**Round 37: the panel probe works -- the page's environment is what drops the variable -- and two recorded notes were wrong.**
+
+Run by hand with the variable definitely in its environment, the model wrote 29299 probe lines in forty-five
+seconds, 28416 of them pixel data, so the panel path is being driven exactly as the firmware intends and the
+instrument is sound. Comparing the two cases puts the fault in one narrow place: uvk5_supervisor.py builds
+QEMU's environment as dict(os.environ), which does inherit, yet the page's own emulator never sees the
+variable, so it is lost between the shell that starts the page and the server process it becomes. The fix is
+to pass it the way the other launcher options are passed rather than relying on inheritance.
+
+Two corrections to this file, both of which have been costing time. The probe prints s->selected, not the raw
+chip-select level, so its cs=1 means the panel IS selected and its bytes ARE stored -- reading that field as a
+level and concluding the panel ignores everything would have been wrong. And the old note that a hand-started
+emulator never draws is not true of a hand-run against the same working image the page uses: this run booted,
+drew, and streamed pixel data continuously. That note has been steering measurement through the page for many
+rounds; it should be re-derived rather than believed.
 "PANEL a0=", and it was built after the source was last modified, so the model's panel probe is in the
 binary that is executing. No panel.log appears anywhere in the repo or the build tree, which means the
 variable is simply not in that process's environment: run-webui.ps1 passes only --qemu, --elf and --flash,
