@@ -1083,6 +1083,26 @@ So the next round has a quantitative target: build the same trivial app with a c
 800 and 1200 bytes, drive each through the handover, and find where the panel stops changing. That is a
 ladder in the one variable that has not been swept.
 
+**Round 28: the ladder is built, and the entry point -- not the app -- is what blocks it.**
+
+The ladder in the unswept variable is ready. A trivial app does exactly two things: it calls a chain of
+no-op functions, then fills every framebuffer byte with 0xFF and blits, so the panel either goes all lit
+(the app ran) or stays as it was (it never did). The chain costs about 5.2 bytes per function: 20 functions
+give a 256-byte app, 70 give 620 bytes, so the rungs can be placed where they are wanted.
+
+Neither rung could be measured, because the launch did not reach the handover. With the 256-byte app in all
+four slots the sequence read: main screen 485, after F and 7 460, after DOWN 537 (the menu is open), and then
+582 for twelve consecutive readings across three MENU presses -- the first press moved something, the rest did
+nothing. That is the inert-launcher state this file already describes, and it is the same wall rounds 22 to 26
+ran into from the other side.
+
+So the honest summary of the last stretch is that the app pipeline is measured (the header and exactly
+code_size bytes are read; the PC probe sees the overlay; one complete frame was painted in round 17) while
+the entry point -- the synthetic key sequence that is supposed to run an app -- is not reliably reproducible
+from the page. Until it is, no ladder can be walked and verified playable cannot be claimed. The next round
+should therefore treat the launcher's own key handling as the subject: the same presses, read back after each
+one, and the model's keypad path instrumented rather than the app's.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
