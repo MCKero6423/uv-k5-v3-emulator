@@ -749,6 +749,28 @@ with the panel blank or showing only its boot screen, and keys then do nothing -
 rounds mistook for the app's failure. And never hand-start QEMU for this: the hand-started instances came up
 without a picture, while the page's own instance draws.
 
+**The overlay app starts, runs, and dies the moment it calls a firmware service that reads the external flash.**
+
+Measured on the page's own emulator with its probes on (UVK5_PC_PROBE / UVK5_FLASH_PROBE inherited through its own
+launcher, so the instance being measured is the one that draws). Three apps, same row, same keys:
+
+* **Spin, 16 bytes, calls nothing**: after MENU it is at 0x20000286 in 42 of 383 PC samples, i.e. it loops in the
+  overlay forever. The loader works.
+* **Minesweeper, 2408 bytes**: the flash probe shows exactly one big read, 0x109000 len 2408, whose first bytes are
+  the blob's own, so the code is loaded; the PC probe catches a single sample inside the overlay before the app is
+  gone. It lives well under 100 ms and dies.
+* **Phases, 372 bytes**, which draws a bar straight into the framebuffer between calls so the screen reports how far
+  it got: the bars for framebuffer-only and for led are on screen, and the bar after delay_ms never appears.
+
+The overlay is the PY25Q16 sector cache -- app_overlay.h says so itself (it copies the code into the 4 KiB overlay,
+the PY25Q16 sector cache, shared VMA with the multiboot RAM stub). So the picture is: while the app runs, a service
+reads the external flash (the font table lives at 0x1E0000 there), the sector lands on top of the app, and the app
+executes flash data. Real hardware cannot behave that way -- upstream's own apps call print_tiny -- so the firmware
+must gate the sector cache while an app is loaded, and **that gate is what the model is missing**.
+
+Next: find the gate in the firmware's flash driver (a memory flag, a register, a GPIO) and check what the model
+answers for it. This is the first time the failure has a name and a reproducible three-app comparison behind it.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
