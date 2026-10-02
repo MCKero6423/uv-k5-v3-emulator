@@ -1177,6 +1177,30 @@ box, i.e. the handover. And the oracle was a toggling app -- fill 0xFF and blit,
 whose panel signature no menu can produce. Fifty readings over twenty-five seconds were all exactly 43, none
 above 900, none blank: the app's blits never reach the glass.
 
+**Round 35: the model exonerates the sector cache, the panel path looks right, and the instrument exists but needs a page restart.**
+
+Three things came out of reading qemu/py32f071.c rather than running anything, and one of them withdraws
+the hypothesis this file recorded one round ago.
+
+The panel is on SPI1 and the flash on SPI2 -- the model says so in as many words ("SPI2, not SPI1:
+App/driver/py25q16.c uses SPI2 and st7565.c uses SPI1") and wires st7565_xfer to s->soc.spi[0]. A blit
+therefore cannot touch the external flash at all, so round 34's sector-cache-overwrite mechanism is dead
+and is withdrawn. That also agrees with the flash probe, which saw no transactions after the app's code
+load: there was nothing there to see.
+
+The panel model itself reads correctly: it stores a pixel byte only when cs is low and a0 is high, it keeps
+the controller's own gram, and its column counter is the 132-column one with the col-4 store -- including
+the four-column bug this file documents, which is fixed. Nothing in that path looks like a reason for an
+app's blit to be dropped.
+
+What is missing is the measurement, and the instrument for it already exists: UVK5_PANEL_PROBE logs every
+byte sent to the panel with a0, cs, page and col, which is exactly what separates "the app's blit never
+reaches the driver" from "the driver's bytes never land". It needs the page restarted with that variable
+in its environment, and two attempts to replace the running page failed: a second instance dies because
+port 8080 is occupied, and the port-owner lookup came back empty. The page itself stayed healthy throughout
+(main screen 485), so nothing was left broken for the user. Next: find the page's pid another way -- netstat
+-ano, or Get-Process python -- stop it, start it with UVK5_PANEL_PROBE, and read that log around a launch.
+
 Then the offsets were checked properly, and the earlier reading of them was my own arithmetic error: the struct
 begins with uint8_t abi_major, uint8_t api_level and uint16_t api_size -- four bytes in total, not twelve -- so
 fb is at 4, display_clear at 8, and print_tiny at 28. The app's calls land exactly there. Header identical to
