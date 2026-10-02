@@ -1297,6 +1297,31 @@ bytes 81b0034803490160, and the panel holds 615 non-zero bytes instead of the la
 the app runs, and it paints. The display path, the loader, the header and the CRC were never the problem.
 
 Two causes, and they are independent. First, the app menu's selected row is not slot 0: every launch in this
+
+**Round 51-52: the corruption moves with code_size -- the model's flash read loses its last ~124 bytes.**
+
+Two measurements, one app at two sizes, settle it. At 2744 bytes the six corrupted bytes sit at offsets 2620,
+2621, 2622, 2623, 2627 and 2650; at 2568 bytes -- the same app after trimming 176 bytes out of it -- they sit at
+2444, 2445, 2446, 2447, 2451 and 2474. Both are exactly 124 bytes from the end. The corruption is therefore not a
+fixed address being clobbered: it is the last 124 bytes of whatever was read that come out wrong.
+
+That also fits what already worked: the 24-byte marker app passed verification and ran, because 24 is shorter than
+the damaged tail, while Minesweeper at 2568 and 2744 bytes always fails its CRC with APP_ERR_CRC and never runs.
+It is the same signature as the four DMA and flash faults this file already documents, and it retires the size
+ladder for good: short apps ran and long ones died, and the reason was never the size as such -- it was the tail of
+the read.
+
+The evidence that it is the model and not the image is direct: the flash image at slot 1's code offset hashes to
+the header's 0x3c12630d with zero differing bytes, and the guest's overlay over the same span comes out
+0x1312d98c. The app is right on disk and wrong in RAM.
+
+Trimming the app was still worth doing and is recorded: removing the three temporary marker probes, shortening the
+header string and dropping the cursor readout took Minesweeper from 2744 to 2568 bytes, compiling with no
+warnings -- but a tail bug cannot be dodged by shrinking, because the tail shrinks with the app.
+
+Next: the model's flash read path. The firmware uses SPI_ReadBuf, so this is the DMA-driven read in py32f071.c --
+the same place the four documented bugs lived -- and the thing to look for is where the final partial burst is
+counted or addressed.
 session installed into slot 0 and started a different row, which the overlay's contents gave away -- it held
 Minesweeper's code (f0b59bb0fa490860c5690024...) when Mark had been installed in slot 0. Second, the overlay's tail
 is clobbered before the CRC is checked: six bytes at offsets 2620..2650 (0x20000CBC onwards) that the app's code
