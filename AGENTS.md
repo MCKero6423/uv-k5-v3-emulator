@@ -1227,6 +1227,28 @@ now with the real Minesweeper: 103370 pixel bytes after the keys, dominated by 0
 longest run of 97640 -- about 95 full-screen clears -- and underneath it the app's own drawing bytes, 7f 287,
 41 234, 08 192, 40 174 and so on, which are its text and box characters. Since the app calls display_clear()
 once per frame, a full-screen clear followed by a few hundred bytes of glyphs is exactly the expected shape.
+
+**Round 41: the panel's own memory, read over QMP and rendered as text, shows exactly what the user sees.**
+
+The model exposes the controller's display RAM as the QOM property gram on /machine/panel, and the keypad as a
+press property on /machine/keypad -- so one QMP connection can press F, 7, DOWN, MENU and then read the actual
+picture. That is what the page draws from, and it needs neither the page nor a probe.
+
+Before the keys: 485 non-zero bytes, the radio's own main screen, with F4HWN and the big digits legible in the
+render. After MENU: 43 non-zero bytes, and the render is a single boxed title about 42 columns wide and seven
+rows tall near the top with text inside it, and fifty-seven empty rows below. That is precisely the picture the
+user described -- a title label over one blank box -- so the symptom is now reproduced from the glass itself
+rather than inferred from transfer counts.
+
+Put beside rounds 39 and 40, both things are true at once: the app does run and blit (105 consecutive
+full-screen writes from the toggling app, and Minesweeper's own glyph bytes 7f, 41, 08, 40 in the panel
+stream), and the app then dies, after which the launcher repaints its own title box. What ends up on the
+glass is the launcher's frame. The remaining question is therefore the app's lifetime, not its drawing.
+
+Two method notes. The QMP socket takes a single client, so pressing keys through one connection and reading
+the panel through another times out -- as this round hit twice; do both on one connection. And the JSON is a
+minimal PNG writer plus a reader, so the captures can be re-rendered as text without any image library: the
+ASCII form is what makes this readable, since the model writing these notes has no image input.
 So the app paints: the earlier "blank screen" is not a broken path.
 
 Also worth recording: the FillFF variant (fill 0xFF only, never fill zero) failed to build and the failure was
