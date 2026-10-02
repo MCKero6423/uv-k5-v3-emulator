@@ -2667,3 +2667,33 @@ nor drawing alone explains it.
 The next measurement is therefore a single change on a working base: strip the print_tiny calls out of
 Minesweeper's draw() and render it with framebuffer writes only. If it paints, the firmware's font path is
 what ends a large app, and the fix is to draw without it -- which also makes the game playable.
+
+**Round 73: the font is not the wall -- a Minesweeper with every print_tiny routed to a no-op fails the same way.**
+
+Round 72 left one clean one-change experiment: keep the game exactly as it is, but send every print_tiny call
+to a no-op, so the font path -- and nothing else -- is removed. The board is still drawn into the framebuffer
+and still blitted:
+
+    routed 6 print_tiny calls through a no-op
+    compile 0, diagnostics 0
+    NoFont.app code 2328 B (the game is 2568 B)
+    boot ink 485, after F, 7, DOWN ink 526, then MENU -> ink 43 and nothing further
+
+Same outcome as the full game. So the font is not what ends a large app, and the earlier rounds that suspected
+it were pointing at the wrong thing -- twice now, once from a bad launch row and once from a variant that
+changed the right thing and showed the same result.
+
+Put beside round 72 the rule is narrow: a 44-byte app that fills the framebuffer and blits works, and a
+2328-byte app that does the same thing does not. The difference is size and only shows up for apps that draw.
+That is where rounds 30 to 38 were, with the app executing from the same RAM the PY25Q16 driver uses as its
+sector cache: a large app that goes through the firmware's display path can have a sector land on top of its
+own code.
+
+A first, smaller thing also has to be recorded: the build recipe's -mcpu takes its value joined, not as a
+separate argument. Passing them apart makes zig reject the command with "Unknown Clang option: '-mcpu'", and
+in round 70 that never surfaced because the .app already existed and nothing was rebuilt.
+
+The next measurement uses the model-side write probe built in round 67, aimed at the framebuffer at
+0x20001342. Watching which PC stores there while the no-font app runs says whether the app writes the
+framebuffer at all, and whether the writing PC is inside the overlay or somewhere else -- which separates
+"the app never got there" from "the app is running and its writes are landing in the wrong place".
