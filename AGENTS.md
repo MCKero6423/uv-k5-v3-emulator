@@ -1254,6 +1254,29 @@ pixel-data lines to 1930061 -- sixty-eight times more -- which is the measure of
 suppressing the guest. So it was perturbing what it watched, and its readings about volume were not usable.
 
 With that fixed, the pictures match. Replaying the model's own store rule over the whole transfer log (a0=1,
+
+**Rounds 44-45: the loader is read line by line, the overlay really is loaded, and every gate before the call passes.**
+
+Three instruments agreed on the same picture. A memsave of 0x20000280 taken twice after MENU holds the app's own
+code, 2738 of 2744 bytes identical, so the copy is complete and stays. The PC probe's 14505 samples contain not
+one inside that 4 KiB -- the CPU never enters the app -- and the samples sit at 0x08005118/0x08005122. The flash
+probe's last transaction is the app's code read (addr=105000 len=2744, first bytes f0b59bb0...), with nothing after it.
+
+0x08005118 decodes as a PY32 SPI byte transfer: movs r2,#2; ldr r3,[pc] (=0x40013000); poll [r3+8] bit 1 (TXE);
+strb to [r3+12] (DR); poll bit 0 (RXNE); read DR. The model's own comment confirms the layout (CR1 0x00, SR 0x08,
+DR 0x0C) and keeps TXE asserted, so this is not a hang on a missing flag -- the firmware is doing transfers, which
+matches the 1.93 million of them. So it is looping in firmware, not stuck.
+
+The launcher itself was then read from the firmware's own source (App/apps/app_overlay.c, fetched). APP_LaunchOverlay
+validates the slot, requires h.link_vma == the overlay buffer, invalidates the sector cache, memsets the overlay,
+reads exactly code_size bytes in, checks the CRC, and only then calls entry(&app_api) at line 1162. Every one of
+those gates passes for this app: magic FAP1, hdr 1, abi 1, api_min 1, committed set, capabilities 0, code_size 2744
+within APP_OVERLAY_MAX, entry_off 0, link_vma 0x20000280 -- and MB_Crc32Bytes is an ordinary CRC-32 (init
+0xFFFFFFFF, reflected 0xEDB88320, final xor), so the host tool's 0x3c12630d is exactly what the firmware expects.
+
+So the copy happens, the checks pass on paper, and the call still does not take. Between the copy and the call the
+only hardware-touching statement is RADIO_SetupRegisters(true) at line 1159 -- and the PC is sitting in a PY32 SPI
+routine. That is where the next round starts, and it is one function wide.
 col in 4..131, gram[page & 7][col - 4] = byte) and then counting non-zero bytes gives 43 -- exactly what the
 gram property reported, and its md5 agrees with the frozen frame read in round 42. Every one of the 1.93 million
 pixel bytes is accounted for, and the writes cover all eight pages and all 128 columns, so nothing is dropped
