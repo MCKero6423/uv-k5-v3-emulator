@@ -3521,3 +3521,34 @@ Next: read the GPIO model's output-to-pin-out path and check whether a write to 
 propagates to the connected lines at all -- in particular whether it propagates for the store the firmware
 actually uses, since SetOutputPin and ResetOutputPin on this vendor's part go through the set and reset
 registers rather than a plain store to ODR.
+
+**Round 107: the column lines never change at all, and the likeliest reason is that I read the wrong source.**
+
+The GPIO model's output path is correct, so that link is not the fault: py32_gpio_update fires every changed
+pin's line, and the write path covers ODR, BSRR and BRR, which is everything SetOutputPin and ResetOutputPin
+use.
+
+So the two things the row rule needs were instrumented together -- the key state and the column drive -- by
+printing from keypad_col_changed whenever the model holds a key:
+
+    COLSEL lines while F is held for eight seconds: 0
+    ROWREAD total: 0
+    ROWSEENB n=1  moder=0x0001155b idr=0x0000fdff odr=0x00000004
+
+keypad_col_changed is never called. col_high therefore keeps its reset value -- every column high -- and the
+row rule's condition, a held key on a currently-low column, can never be true. That is the whole of why no row
+ever goes low.
+
+And odr is 0x00000004 for the entire run: bits 3 to 6, the four scan columns, never change. The firmware's
+SetOutputPin(PIN_COLS) and ResetOutputPin(PIN_COL(j-1)) are not reaching the model's output register at all,
+while the same firmware reads the input register three million times. A device that is polled but never driven
+is the signature of a binary that does not contain the code being read.
+
+Which points at the thing this file has warned about since its early sections and which I did not check before
+writing twenty rounds of notes against it: the sources in work/dl_*.c are the Labs build, and the notes
+themselves record that the page's firmware is 109.3 KiB while the Labs build is 111.9 KiB -- two different
+builds. Every reading taken here has been compared against the wrong file's keypad driver.
+
+So the next step is not another probe but an identity check: establish what the binary under test actually is,
+by its banner and its size and CRC, and put it beside the source it was built from. Reading the right source is
+a cheaper fix than any of the twenty rounds spent reading the wrong one.

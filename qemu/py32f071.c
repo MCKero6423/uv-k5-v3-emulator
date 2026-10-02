@@ -549,6 +549,23 @@ static void keypad_col_changed(void *opaque, int line, int level)
     if (line < 1 || line >= KEYPAD_COLS) {
         return;
     }
+    /* ROUND 107: tie the key state to the column drive, which is the pair the
+     * row rule needs. Print only while something is genuinely held. */
+    {
+        unsigned held = 0;
+        for (int pc = 0; pc < KEYPAD_COLS; pc++)
+            for (int pr = 0; pr < KEYPAD_ROWS; pr++)
+                if (s->pressed[pc][pr]) held |= (1u << (pc * KEYPAD_ROWS + pr));
+        if (held) {
+            static int shown = 0;
+            if (shown < 20) {
+                shown++;
+                fprintf(stderr, "COLSEL line=%d level=%d pressed=0x%05x rowbits=%d\n",
+                        line, level, held, !!(s->pressed[line][0] || s->pressed[line][1] ||
+                                              s->pressed[line][2] || s->pressed[line][3]));
+            }
+        }
+    }
     s->col_high[line] = level != 0;
     keypad_update_rows(s);
 }
