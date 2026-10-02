@@ -999,6 +999,29 @@ the deliberate correction above it: the earlier attempt at this round blamed the
 removed the instrumentation and rebuilt the round-17 source did not bring the frame back, which is what moved
 the suspicion to the launcher and the image rather than the app.
 
+**Round 24: the launch sequence, key by key, and proof that the app really is loaded and entered.**
+
+Reading the panel after each single press from a fresh power-on gives the sequence the launcher actually
+wants, and it is not the one this file said before: F, then 7, then **DOWN opens the app menu** (the panel
+goes 489 -> 552), then DOWN again moves the selection (552 -> 526, ink 1799 -> 1677), then MENU hands the
+screen over (ink 210, the launcher's own box). Earlier notes that say F then 7 opens the menu are wrong,
+and that error is what made several rounds of MENU presses look inert: on the freshly opened menu the first
+press only sets the selection, exactly as the round-21 entry says.
+
+With the handover reached, the flash probe shows the load itself as the session's **last two transactions**:
+
+    addr=108000 len=64   first=46415031 01000101   <- the FAP1 header of slot 3
+    addr=109000 len=2444 first=f0b599b0 fd490860   <- the app's code, exactly code_size bytes
+
+and the PC probe (2 ms) catches four samples inside the 4 KiB overlay in a three-second window, so the
+loader copies and the CPU really does enter the app. It then disappears, and the launcher's box stays on
+the glass -- the same shape round 8 described, and the opposite of what round 17 measured from this very
+same artifact.
+
+So the open question is now precise: with the launcher reached and the app entered, what ends it at the
+handover. The next instrument is the 2 ms PC trace across the handover rather than after it, sampled from
+the moment MENU is pressed.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
