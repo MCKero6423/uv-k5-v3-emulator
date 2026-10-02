@@ -2723,3 +2723,29 @@ The probe's likely fault is its shape rather than its idea: an io region overlap
 bytes, and an access the region cannot serve -- a wider or differently aligned one than its valid range allows
 -- is a guest error rather than a forwarding. Fixing that is the next step, and it needs the same A/B as its
 acceptance test: with the probe on, the radio must still boot to 485 and the game must still reach 43.
+
+**Round 75: the probe's damage is address-specific -- it is harmless where it was used and only breaks the
+framebuffer.**
+
+Giving the probe its own backing store, so it no longer dispatches back into the SRAM region, did not help: the
+radio still came up at ink 0. So re-entrancy was not the cause. Running the same image three ways settles what
+is:
+
+    probe off              boot 485, F 7 DOWN 526, MENU 43      normal, 0 stores logged
+    probe 0x20000C0C       boot 485, F 7 DOWN 526, MENU 43      identical, 8 stores, all pc=0x0801ae7a
+    probe 0x20001342       boot 0, and 0 throughout              broken, 1 store
+
+At the overlay address the radio behaves exactly as it does with the probe off, so rounds 67 and 68 -- which
+ran with it there -- are valid and their conclusions stand. At the framebuffer it breaks the display, and the
+difference is what lives at the address: 0x20000C0C is not the framebuffer, and the firmware's display path
+must reach gFrameBuffer in a way an eight-byte io region cannot serve, most likely an access wider than eight
+bytes.
+
+So the instrument's limitation is now precise rather than vague, and so is the fix: make the probe region large
+enough to cover what it watches, with a backing store the same size, and have the handlers split or assemble
+whatever size the guest uses. That would let it watch the framebuffer, which is the measurement round 74 wanted
+and could not make.
+
+One more thing the three runs show, and it is worth having: at 0x20000C0C the only writer across a whole launch
+is the memset at 0x0801ae7a, eight times. The app's own stores that round 68 saw at 0x20000280 came from the
+game, which is not the app installed in this image, so the two runs agree rather than conflict.

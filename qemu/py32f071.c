@@ -3313,8 +3313,9 @@ struct PY32F071State {
     /* Diagnostic write probe over eight bytes of SRAM; see py32_ram_probe_write. */
     MemoryRegion ram_probe;
     bool ram_probe_active;
-    /* Base address of the write probe, so its stores can be forwarded correctly. */
+    /* Base address of the write probe and its own backing store for those bytes. */
     uint32_t ram_probe_base;
+    uint8_t ram_probe_buf[8];
     /* An address space over `container`, so DMA sees the same map as the CPU. */
     AddressSpace dma_as;
 };
@@ -3435,15 +3436,9 @@ static void py32_ram_probe_write(void *opaque, hwaddr addr, uint64_t value, unsi
     fprintf(stderr, "RAMPW pc=%08x off=%u val=%0*" PRIx64 " size=%u\n",
             pc, (unsigned)addr, (int)(size * 2), value, size);
 
-    /*
-     * Forward to the real SRAM: the probe observes, it does not intercept. `addr` is
-     * relative to this subregion, so the offset inside sram is the base of the probe
-     * minus the base of sram, plus addr. Passing addr alone (the first version of
-     * this) wrote to 0x20000000..7 and killed the guest.
-     */
-    memory_region_dispatch_write(&s->sram,
-                                 (s->ram_probe_base - PY32_SRAM_BASE) + addr,
-                                 value, size, MEMTXATTRS_UNSPECIFIED);
+    if (addr + size <= sizeof(s->ram_probe_buf)) {
+        memcpy(&s->ram_probe_buf[addr], &value, size);
+    }
 }
 
 /*
@@ -3457,8 +3452,16 @@ static uint64_t py32_ram_probe_read(void *opaque, hwaddr addr, unsigned size)
     PY32F071State *s = opaque;
     uint64_t value = 0;
 
-    memory_region_dispatch_read(&s->sram, (s->ram_probe_base - PY32_SRAM_BASE) + addr,
-                                &value, size, MEMTXATTRS_UNSPECIFIED);
+    /*
+     * The probe keeps its own copy of these bytes rather than dispatching into the
+     * SRAM region. The first version forwarded with memory_region_dispatch_read and
+     * memory_region_dispatch_write, which is a re-entrant access into the same address
+     * space; with the probe aimed at gFrameBuffer the radio then never drew at all, so
+     * the instrument was changing what it measured. Owning the bytes avoids that.
+     */
+    if (addr + size <= sizeof(s->ram_probe_buf)) {
+        memcpy(&value, &s->ram_probe_buf[addr], size);
+    }
     return value;
 }
 
