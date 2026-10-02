@@ -2318,3 +2318,23 @@ Panel settings are a fifth, different case: contrast and inversion are not in th
 framebuffer at all, so nothing that renders `gFrameBuffer` can show them.
 `TYPE_ST7565` models the controller's own registers and `tools/uvk5_lcd.py` applies
 the inversion to the picture; see README.md.
+
+**Round 57: the overlay is already wrong a quarter of a second after MENU, and never changes again.**
+
+Hashing the overlay every 250 ms from MENU onwards, with no probes on: before MENU it holds the previous
+content (crc 169b5c51); at +0.25 s it is 4f23f6f3, which is not the app's 60234c72; and every later sample is
+that same 4f23f6f3. So the load finishes, the overlay ends up wrong, and nothing touches it afterwards.
+
+Put beside round 56 -- where the window probe showed the transfer that lands in the overlay carries the correct
+bytes at indices 0, 1, 2444 and 2445, and no other run in that log has an rx address inside the overlay -- the
+writer is not the DMA. It is a CPU store, inside the quarter second after MENU, and it lands at
+overlay + code_size - 124.
+
+The instrument that would name it is a write watchpoint on that word: the gdbstub is already listening on the
+gdb port and supports Z2, so a short client can set one, let the launch run, and read the PC when it fires. That
+halt is the measurement rather than a perturbation of it, which is the one case where the advice against
+attaching a debugger does not apply.
+
+Also this round: the Chinese note for round 56 is in, appended at the end of the file because the anchor the
+append script picks keeps landing on a fenced code block -- the same failure recorded in round 54. The heading
+counts still match, and the parity check passes.
