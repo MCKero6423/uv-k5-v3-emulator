@@ -3428,3 +3428,31 @@ So the next experiment is two runs, not one instrument: one session that only la
 loop doing the polling), and one that gets the app running and then presses keys, comparing the probe's final
 totals. If the second total is near zero the app is not polling the matrix at all; if it is comparable, the
 matrix is being read and what fails is inside the firmware's own consumer.
+
+**Round 104: the three-session comparison returns zero everywhere, and that contradicts round 102.**
+
+The experiment round 103 asked for, in its cleanest form -- no sampler, three separate sessions, one number
+each: hold F for eight seconds with no launch (the resident loop polling); launch the app and then stay silent;
+launch the app and then hold F for eight seconds. All three used the same image, the same probe, and the same
+key sequence as round 102.
+
+    hold F only, resident loop        0 low-row reads, no column ever selected
+    launch only, then silence         0
+    launch, then hold F              0
+
+Round 102, with the identical image and probe, reported 97401 reads with column selections 0x70, 0x68 and 0x38
+and rows 0xe and 0x7. One of those two measurements is wrong and this round does not establish which. This file
+exists in large part to insist that such a pair be written down rather than smoothed into a story, so: recorded
+as a contradiction, with both numbers attached.
+
+Two things are worth noting before the next attempt, because they are the likeliest places for the difference to
+hide. The first is that a key has to be held for a row to go low at all, which round 104's own first run
+demonstrated when it removed the presses and got a clean zero -- that zero was correct, not a failure. The second
+is that this session has rebuilt the emulator twice since round 102, and every one of these runs begins by
+killing qemu-system-arm.exe and starting a fresh one; if one of those binaries differed, every number after it
+is measured against a different instrument.
+
+So the next step is not a new probe but a replay: run round 102's client, unchanged, against the current binary.
+If it reproduces 97401 the three-session run is the anomaly and its own key sequence is the suspect; if it
+returns zero, the 97401 was measured on something that no longer exists, and the probe has to be re-verified
+before any conclusion drawn from it survives.
