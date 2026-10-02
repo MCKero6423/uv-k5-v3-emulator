@@ -1288,6 +1288,29 @@ app is not at fault. But the 2744 bytes that were actually sitting in the overla
 with memsave -- hash to 0x1312d98c, which is not the header value. APP_LaunchOverlay computes MB_Crc32Bytes over
 that buffer and compares it with the header, so it takes the APP_ERR_CRC branch at line 1117 and returns before
 ever reaching entry(&app_api). That is why the app never runs, and why the code is nevertheless sitting in the
+
+**Rounds 49-50: the app runs -- and two separate causes fall out, both now proved.**
+
+Installing the 24-byte marker app into slot 1 instead of slot 0 changed everything. After F, 7, DOWN, MENU the
+fixed address reads efbeadde -- the app's first instruction really executed -- the overlay starts with the app's own
+bytes 81b0034803490160, and the panel holds 615 non-zero bytes instead of the launcher's 43. So entry() is reached,
+the app runs, and it paints. The display path, the loader, the header and the CRC were never the problem.
+
+Two causes, and they are independent. First, the app menu's selected row is not slot 0: every launch in this
+session installed into slot 0 and started a different row, which the overlay's contents gave away -- it held
+Minesweeper's code (f0b59bb0fa490860c5690024...) when Mark had been installed in slot 0. Second, the overlay's tail
+is clobbered before the CRC is checked: six bytes at offsets 2620..2650 (0x20000CBC onwards) that the app's code
+holds as zero, and the overlay holds as a firmware pointer (0x0801D640).
+
+That second cause explains the size ladder that cost several rounds: the clobbered offset is fixed, so an app
+smaller than it passes verification and runs, and an app that reaches past it -- Minesweeper is 2744 bytes, only
+about 124 bytes past the first corrupted byte -- fails with APP_ERR_CRC and never runs. Small apps ran, big ones
+died, and the reason was never the size as such.
+
+Two ways forward, both small. Shrink the app under the clobber point and it should launch as it is; or find what
+writes at SectorCache+2620. That region is PY25Q16_OverlayBuffer(), and py25q16.c shows any cached sector read
+does ReadBufferRaw(SecAddr, SectorCache, SECTOR_SIZE) into it -- so the writer is very likely a firmware path that
+caches a sector while the app is loading, which the model may be provoking.
 overlay: the copy at line 1113 happened, the verification after it did not pass.
 
 Six bytes differ, at overlay offsets 2620, 2621, 2622, 2623, 2627 and 2650 -- address 0x20000CBC onwards. The app's
