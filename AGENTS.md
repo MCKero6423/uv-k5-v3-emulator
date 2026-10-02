@@ -2875,3 +2875,24 @@ The next step is the game itself, on the row that launches, read the right way: 
 counters and a field, and those are non-black, so a frame that reaches the glass will move the panel. What
 remains open is whether the game's own drawing produces such a frame, which is now a question the panel can
 actually answer.
+
+**Round 83: the game does not paint -- measured with a metric that has now been validated three ways.**
+
+Minesweeper in slot 1, launched with F, 7, DOWN, MENU, polled every three seconds for three minutes:
+
+    boot ink 485
+    menu on its row ink 526
+    +3 s ink 43, and 43 at every sample for the next 180 seconds
+    then a DOWN and twenty seconds more: still 43
+
+That is now a real finding, because the metric has been calibrated against three fills the app controls:
+0xFF moves the panel to 939, a stripe pattern moves it to 491, and 0x00 does not move it -- correctly, since
+the driver does not send all-zero pages. A frame that reaches the glass therefore moves the panel, and the
+game's does not.
+
+So the display path is fine and the game's own frame is the thing that never arrives. That is where round 73
+left the question, but with an instrument that could not then tell a black frame from no frame; now it can.
+
+The cheapest next cut is to combine what works with what does not: display_clear(), then the app's own stripe
+fill, then blit_full. If that paints, the sequence is fine and the game's failure is purely in what it draws;
+if it does not, the call sequence the game uses is itself part of the problem.
