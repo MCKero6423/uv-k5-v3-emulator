@@ -3025,3 +3025,33 @@ ran, so the frame it sent is one the driver skips -- all-zero pages -- and after
 api->fb at all. Both halves of that sentence are measurable from inside the app, which is the next step: have it
 count the framebuffer's non-zero bytes right after draw() and blit that count as a bar, so "nothing was written"
 and "written but skipped" stop looking identical.
+
+**Round 90: two measurements of the same draw() disagree, and that is the result.**
+
+The counter probe does what the game does -- new_game(), draw() -- then counts the framebuffer's non-zero
+bytes, clears it, and paints that count as a bar (n/8 columns wide) plus a fixed marker in columns 126 and 127,
+so "the app painted nothing" and "the app painted a zero-width bar" cannot be confused. One entry, one
+app_main, counted in the source before the build; 872 bytes; compile clean.
+
+    boot 485, after MENU ink 834   (the launcher's own screen is 43)
+
+834 of 1024 panel bytes are non-zero, which is a nearly full-width bar, which means draw() left roughly a
+thousand non-zero bytes in the framebuffer. So the game's drawing works and a blit right after it reaches the
+glass.
+
+Then the same draw() inside the real game, with a second blit added because a repeated blit looked like the
+difference (Minesweeper 1.2, 2392 bytes, compile clean):
+
+    boot 485, then ink 43, and row 2 reads columns 42..84 with 26 lit -- the launcher's title box
+
+The two runs disagree about the same code. One of them is wrong and this round does not establish which, so
+the honest reading is that both are suspect until a measurement that does not depend on reasoning about the
+bar settles it.
+
+Note also what the second run rules out: two blits back to back do not fix it, so "blit twice" is not the
+answer, and the earlier page-major decode mistake in this round's first script is a reminder that a reader I
+wrote minutes ago needs the same scepticism as one written rounds ago.
+
+Next measurement, and it is designed to be unarguable: have the app write the count itself into a few bytes of
+the framebuffer as bits -- 11 bits of n, in known positions -- and read them straight out of the panel hex.
+No bar, no width, no decode: the number is on the glass or it is not.
