@@ -1060,6 +1060,29 @@ whoever clicks through the page: whatever row the cursor lands on, MENU starts t
 launching the game and getting out of it -- are now the things to measure next, along with why the app returns
 instead of staying up (round 17 saw it paint a full frame from this same artifact).
 
+**Round 27: an app's first action, placed correctly, still does not run -- and the pattern that fits is code size.**
+
+The user's screenshot is the state this file already describes: the app menu's title (drawn in the 8-bit font,
+so F4HWN reads as F4HHH) over one blank white box, which is the launcher's own frame with nothing of the app
+on the glass.
+
+To separate "the app is not entered" from "the app draws nothing", the game's app_main was given an
+unmistakable first act: fill every framebuffer byte with 0xFF and blit. The first attempt inserted it before
+`A = api;`, so it dereferenced an unset pointer and faulted -- my own bug, and it invalidated that run. Moved
+after the assignment (source +199 bytes, app 2508 bytes) the panel still never leaves 43 over 48 s, so the
+probe's blit never happens. A 300-byte app doing exactly that fill-and-blit does paint (596 non-zero bytes),
+and the loader has been seen reading the header and exactly code_size bytes.
+
+Taking every measurement together, the variable that fits is the app's **code** size rather than its blob
+size: a 3028-byte blob whose code is a few dozen bytes runs and can call print_tiny, display_clear and
+get_key; Phases at 372 bytes of code runs; Ladder at 544 bytes dies; Minesweeper at 2400+ bytes dies with
+its first instruction having no effect. Round 8's ladder said the same thing and was set aside because a
+big blob that calls nothing survived -- which only shows that blob size alone is not the limit.
+
+So the next round has a quantitative target: build the same trivial app with a code body of 400, 512, 600,
+800 and 1200 bytes, drive each through the handover, and find where the panel stops changing. That is a
+ladder in the one variable that has not been swept.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
