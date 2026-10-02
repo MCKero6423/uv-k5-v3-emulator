@@ -963,6 +963,23 @@ docs are bilingual and every step is committed and pushed. Input is the one item
 narrowed to a call -- a key press ends the running game, which is the part that is measured, and the probes
 meant to read the raw key codes never painted.
 
+**Round 21: the launch needs a press before MENU, and that explains the whole "the probes never ran" saga.**
+
+The panel reading that looked like a paint was the app menu itself: rows 0-6 are the title box and rows 18-22
+the slot list, with 26 lit pixels on row 2 where the probe's own marker bar would be 120. So MENU on the
+initially opened menu did not launch anything -- it selected a row. Round 17's Minesweeper run worked because
+it pressed DOWN three times first, which left a row selected, and only then pressed MENU.
+
+That single procedural detail accounts for every unexplained probe failure in the last three rounds, and it
+rehabilitates both the probes and the game: with a press first, an app that clears the framebuffer, draws
+through a helper and blits does run (499 on the panel, 10.9% of the PC samples inside the overlay). The
+lesson is the one this file already carries in another form -- when a sequence of inputs is involved, check
+what the first press does before concluding anything about the code under test.
+
+So the input question reopens on solid ground: the game does run and paint when it is actually launched, and
+the remaining unknown is what the keys do inside the running app, with the launch sequence now known to be
+F, 7, DOWN (to select), MENU (to run).
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
