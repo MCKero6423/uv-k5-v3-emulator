@@ -864,6 +864,28 @@ comparable results, they are one good measurement and two unreadable ones. The f
 self-contained spin with each call, so a live app is provably in the overlay most of the time and the trace
 separates the two cases.
 
+**Round 15: with a validated metric, every individual call survives repetition -- and the killer is inside draw().**
+
+The metric first, because the previous round's was not trustworthy: each variant is for(;;) { long spin; one call; },
+so a live app is in the overlay most of the time and a dead one is never there. The control (spin only) scores
+27.2%; display_clear 26.9%, get_key 27.1%, delay_ms(40) 26.8%, print_tiny 27.0% -- **so all four calls survive
+being repeated**, and the control proves the metric can tell the two cases apart.
+
+That also means variant B of the previous round (four calls in a loop, no spin) was almost certainly not dead: it
+spends nearly all its time inside firmware functions, which look exactly like a dead app from the trace. The
+lesson is the same one this file keeps repeating -- a measurement that cannot show the thing you are looking for
+will happily return zero.
+
+With that out of the way, the bisect has closed on one function. Minesweeper with its whole draw() gutted to
+display_clear() + blit_full() **runs** -- 97 samples inside the app, alternating with firmware PCs, and the
+firmware still serving it. The full draw() draws nothing at all: over twenty seconds the panel never leaves the
+launcher's title box, and ink stays at 210, meaning display_clear() never even ran. So whatever ends the app is
+inside draw()'s body -- the eleven print_tiny calls, the framebuffer writes and the cursor invert -- and that is
+the last mile.
+
+Next: the same variant harness on the three pieces of draw() separately (the header text, the 81-cell loop, the
+cursor), each with the loop spin that the surviving apps have.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
