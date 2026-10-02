@@ -3099,3 +3099,30 @@ were spent inferring what the compiler could have been told.
 
 Next: press MENU inside the running game and watch the field appear, which is the last thing standing between
 this and playable.
+
+**Round 93: the game is on the glass -- header, counter and cursor -- and only the reveal is left.**
+
+Minesweeper 1.3 in slot 1, launched with F, 7, DOWN, MENU, then read row by row:
+
+     0|...........................................#########################################......
+     2|..........................................##.###.#.#.#.#.#.#...#####.#.#.#.#.#.#.####.....
+     6|...........................................#########################################......
+    42|...............#......#.................................................................
+    44|...............#......#.................................................................
+    46|...............#......#.................................................................
+    48|................######..................................................................
+
+The upper block is the header print_tiny draws at y=1 -- the M, the two-digit counter and MINES -- and the
+lower one is the cursor frame the app inverts around its cell. Both are the app's own drawing and both are
+legible, which is what "it renders" means for this game.
+
+What did not happen is the reveal: ink was 57 before MENU, 57 after it, and 57 after a DOWN and another MENU.
+So either the key does not reach the running app, or the reveal paints into cells that were already lit. That
+is now the whole of what stands between this and playable, and it is a question the panel can answer -- the
+field's numbers appear only when a cell is opened.
+
+One detail worth noting for whoever picks this up: the cursor frame reads at rows 42 to 48 and the game's own
+arithmetic puts it at 33 (FIELD_Y 10 plus four rows of PITCH 6, minus one), so there is still about a nine-row
+offset somewhere between the app's coordinates and the reader's. It does not affect what the game draws -- both
+are the app's output -- but a reader that is nine rows off would mislead the next round, so it is written down
+rather than smoothed over.
