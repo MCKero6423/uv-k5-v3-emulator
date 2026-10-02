@@ -323,6 +323,30 @@ static uint64_t py32_gpio_read(void *opaque, hwaddr addr, unsigned size)
 static void py32_gpio_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
 {
     PY32GpioState *s = opaque;
+    /* ROUND 109: unguarded. Log every change to port B's column bits, whatever
+     * else is happening, so a change that precedes a keypress is not filtered out. */
+    if (s->port_name && (s->port_name[0] == 'b' || s->port_name[0] == 'B')) {
+        /* ROUND 110: count every change to bits 3..6 over the whole run, and print
+         * the first ten. No cap on the counting itself -- see round 108. */
+        static unsigned long cols_written = 0, writes_b = 0, printed = 0;
+        const uint32_t before = s->odr & 0x78u;
+        uint32_t after = before;
+        if (addr == GPIO_BSRR)      after = (before | ((uint32_t)value & 0x78u)) & 0x78u;
+        else if (addr == GPIO_BRR)  after = (before & ~((uint32_t)value & 0x78u)) & 0x78u;
+        else if (addr == GPIO_ODR)  after = (uint32_t)value & 0x78u;
+        writes_b++;
+        if (after != before) {
+            cols_written++;
+            if (printed < 10) {
+                printed++;
+                fprintf(stderr, "GPIOCOLCHG n=%lu addr=0x%x value=0x%x cols %02x -> %02x (port-writes so far %lu)\n",
+                        cols_written, (unsigned)addr, (unsigned)value, before, after, writes_b);
+            }
+        }
+        if ((writes_b % 200000UL) == 0) {
+            fprintf(stderr, "GPIOCOUNTS port_b_writes=%lu column_changes=%lu\n", writes_b, cols_written);
+        }
+    }
     const uint32_t old_odr = s->odr;
 
     switch (addr) {
@@ -549,21 +573,27 @@ static void keypad_col_changed(void *opaque, int line, int level)
     if (line < 1 || line >= KEYPAD_COLS) {
         return;
     }
-    /* ROUND 107: tie the key state to the column drive, which is the pair the
-     * row rule needs. Print only while something is genuinely held. */
+    /* ROUND 110b: count the pairing over the WHOLE run -- no cap on the counting.
+     * 'selecting a column while a key on it is held' is the exact event the row
+     * rule acts on, so count that, and print the first few instances. */
     {
-        unsigned held = 0;
-        for (int pc = 0; pc < KEYPAD_COLS; pc++)
-            for (int pr = 0; pr < KEYPAD_ROWS; pr++)
-                if (s->pressed[pc][pr]) held |= (1u << (pc * KEYPAD_ROWS + pr));
-        if (held) {
-            static int shown = 0;
-            if (shown < 20) {
-                shown++;
-                fprintf(stderr, "COLSEL line=%d level=%d pressed=0x%05x rowbits=%d\n",
-                        line, level, held, !!(s->pressed[line][0] || s->pressed[line][1] ||
-                                              s->pressed[line][2] || s->pressed[line][3]));
+        static unsigned long changes = 0, with_key = 0, printed = 0;
+        changes++;
+        if (level == 0) {
+            for (int pr = 0; pr < KEYPAD_ROWS; pr++) {
+                if (s->pressed[line][pr]) {
+                    with_key++;
+                    if (printed < 8) {
+                        printed++;
+                        fprintf(stderr, "COLWITHKEY n=%lu line=%d row=%d (changes so far %lu)\n",
+                                with_key, line, pr, changes);
+                    }
+                    break;
+                }
             }
+        }
+        if ((changes % 200000UL) == 0) {
+            fprintf(stderr, "COLTOTALS column_changes=%lu with_key=%lu\n", changes, with_key);
         }
     }
     s->col_high[line] = level != 0;

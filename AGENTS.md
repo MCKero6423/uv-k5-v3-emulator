@@ -3582,3 +3582,34 @@ So the next measurement is the unguarded one: log odr together with the held-key
 a key is pressed, rather than at the first few reads or only when something is held. If odr's column bits move
 there, the model is being driven and the row rule has a different problem; if they never move at all, the
 running firmware really is not writing those pins, and the next step is to find what it writes instead.
+
+**Rounds 109-110: the scan is proved perfect, the injection is proved by readback, and the pairing is still zero.**
+
+Two rounds of chasing a number, and the number was mine. Round 109's rebuild failed -- 's' undeclared, because
+the probe went in above the declaration -- and its test ran anyway against the previous binary, reporting a
+clean zero that meant nothing. That is the failure this file describes in its own words: a failed ninja leaves
+the old binary in place. The check is to grep the build output for errors before reading any result.
+
+With the build fixed, the unguarded probe answers the question and then some. Every change to port B's bits 3
+to 6 over a whole run:
+
+    GPIOCOLCHG n=1 addr=0x18 value=0x78  cols 00 -> 78     all four columns high
+    GPIOCOLCHG n=2 addr=0x28 value=0x40  cols 78 -> 38     pin 6 low
+    GPIOCOLCHG n=4 addr=0x28 value=0x20  cols 78 -> 58     pin 5 low
+    GPIOCOLCHG n=6 addr=0x28 value=0x10  cols 78 -> 68     pin 4 low
+    GPIOCOLCHG n=8 addr=0x28 value=0x8   cols 78 -> 70     pin 3 low
+    GPIOCOUNTS port_b_writes=2600000 column_changes=1632105
+
+That is the four-column scan, executed 1.63 million times in one session, with each column pulled low in turn.
+The driver is not idle, not misconfigured and not using other pins: it is doing exactly what
+dl_App_driver_keyboard.c says, through exactly the register the GPIO model handles.
+
+And the pairing, counted rather than sampled, comes back empty: 1.6 million column selections, and not one of
+them while the model held a key on that column. Pressing F was verified independently at the same time --
+qom-get on the keypad's press property answers 'F' immediately after setting it, holds it, changes it and clears
+it -- so the cell is genuinely set and the scan is genuinely running, and they never coincide.
+
+Two verified halves and an impossible middle is exactly the sort of state this file says to write down rather
+than smooth over, so both halves are recorded here with their numbers. The next step is to make one instrument
+report both facts in the same line -- the column change and the byte of s->pressed that call reads -- so the
+disagreement shows itself instead of being inferred from two separate counters.
