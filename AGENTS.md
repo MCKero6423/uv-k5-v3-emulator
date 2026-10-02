@@ -2998,3 +2998,30 @@ the marker at the end of the game's own draw(), or strip the entry attribute fro
 renaming it. And the tooling limit is worth writing down: under ziglang, -Wl,-Map is refused like --defsym,
 objdump -h prints nothing, and nm returns no symbols, so the layout has to come from the build itself --
 pack_app.py's code size plus the loader's own behaviour -- rather than from a map file.
+
+**Rounds 88-89: with ONE entry, draw() is entered and completes -- and the game's framebuffer writes were wrong.**
+
+Round 87's repair, done properly: the marker goes inside the game's own draw() instead of renaming its entry, so
+there is exactly one .text.entry and one app_main -- verified by counting both in the source before each build.
+
+    marker at the START of draw()   -> 491 after MENU   draw() is entered
+    marker at the END of draw()     -> 491 after MENU   draw() COMPLETES, blit_full() included
+
+So the rounds 85-86 reading -- "draw() never returned" -- was the duplicate-entry artifact, as round 87
+predicted, and is retracted. The marker at the end sits after blit_full(), so display_clear, the header text, the
+81-cell loop and the blit all returned.
+
+Then a real bug in the app, found by reading the API rather than guessing: app_api.h line 73 declares
+
+    typedef uint8_t (*app_fb_t)[128];
+
+one byte per pixel -- while the app's put() and invert() wrote it as a bit-packed buffer
+(A->fb[y][x >> 3] |= 1u << (7 - (x & 7))). Every field and cursor pixel therefore went to the wrong byte with the
+wrong value, which is why MsStripes -- which writes fb[y][x] -- painted and the game did not. Both helpers now
+write one byte per pixel, the build is clean at 2388 bytes, and no x >> 3 remains.
+
+It still paints nothing, and that is now a well-posed result rather than a mystery: draw() completes, so blit_full
+ran, so the frame it sent is one the driver skips -- all-zero pages -- and after display_clear() nothing wrote to
+api->fb at all. Both halves of that sentence are measurable from inside the app, which is the next step: have it
+count the framebuffer's non-zero bytes right after draw() and blit that count as a bar, so "nothing was written"
+and "written but skipped" stop looking identical.
