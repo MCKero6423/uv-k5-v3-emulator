@@ -1143,6 +1143,28 @@ The one loop on that path which can spin without touching the firmware is place_
 cells with a reject and no upper bound. It is now capped at 4000 attempts with a deterministic fallback that
 fills from the start of the board, so a board that cannot be drawn randomly is still a board -- and, more to
 the point, a hang there can no longer masquerade as an app that never started.
+
+**Round 31: the app's very first API call has no effect, and the struct layout is the prime suspect.**
+
+Three things were exonerated by measurement. The header: parsed against four real upstream apps (Tetris,
+Breakout, Cube3D, Beam), every field lines up -- entry_off 0, flags 0x0001 for Breakout exactly as for mine,
+name at offset 20, version at 36, link_vma 0x20000280 byte-for-byte identical -- so pack_app.py is right and
+the refusal theory is dead. The entry point: the assembly listing's first function is app_main, its prologue
+push.w {r4-r11, lr} matches the blob's first bytes f0 b5 exactly, and the linker script pins .text.entry to
+offset 0. And the acceptance: the firmware answers status 0 for the app over 0x0730.
+
+What is left is sharper than anything so far. The listing shows the app doing exactly what it was written to
+do: load A, load the api member at offset 28, call it (the first print_tiny), then run new_game() inline and
+settle into the main loop, whose spin is the hottest offset in the PC histogram. The app is running -- 417800
+samples land inside the overlay, clustered at offsets 0x18/0x8a/0x8c/0x9c/0xae, i.e. its own first 180 bytes.
+And the calls at offsets 8 and 28 -- display_clear() and print_tiny() as this source understands them -- do
+nothing observable: the panel never changes and the flash probe records no font read after the code load.
+
+The reading that fits every observation is that the app_api_t layout this app was compiled against is not the
+one the running firmware uses, so the app calls whatever function really sits at those offsets and neither
+touches the display nor the external flash. That would explain a program that runs, burns CPU in its own code
+and has no visible effect at all. The next step is to verify the struct against the firmware's own header --
+its member order and offsets -- rather than against the copy in this repo.
 this page writes and the one an upstream app carries is the thing to diff.
 
 That is where the next round starts: the same alternating-spin shape, one call at a time.
