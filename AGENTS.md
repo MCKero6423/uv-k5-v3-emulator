@@ -3456,3 +3456,36 @@ So the next step is not a new probe but a replay: run round 102's client, unchan
 If it reproduces 97401 the three-session run is the anomaly and its own key sequence is the suspect; if it
 returns zero, the 97401 was measured on something that no longer exists, and the probe has to be re-verified
 before any conclusion drawn from it survives.
+
+**Round 105: the replay is zero, so round 102 does not survive -- and per-port counting finds the real gap.**
+
+Round 102's client, unchanged, against the current binary: zero low-row reads, and the probe printed nothing at
+all. Round 104's own decision rule covers that case -- if the replay returns zero, the 97401 was measured on
+something that no longer exists and the probe has to be re-verified before any conclusion from it survives -- so
+the first job was to make the probe prove it can see anything.
+
+It can. Counting IDR reads per port, with the keypad port's first few logged unconditionally:
+
+    ROWSEENB n=1 readsb=1 moder=0x0001155b idr=0x0000fdff odr=0x00000004 v=0x0000fc87
+    ROWCOUNT idr_reads_b=999235   idr_reads_other=765
+    ROWCOUNT idr_reads_b=1999235
+    ROWCOUNT idr_reads_b=2999235
+
+So the firmware reads port B's input register about three million times -- the keypad scan is not merely
+happening, it is happening constantly -- and in every one of those reads the four row bits, 12 to 15, come back
+high. v = 0x0000fc87 has 0xf there while the F key is held down for eight seconds.
+
+That is the finding, and it is narrower than anything before it. The model pulls a row low only when a held key
+sits on a column that is currently pulled low; the firmware reads the rows three million times and never sees one
+low; therefore the model's notion of which cell is held does not line up with the cell the firmware's own 5x4
+keyboard table looks in.
+
+Two notes on getting here, both worth keeping. The sanity line was added first and only after the replay came
+back empty, which is the right order -- an empty probe is a claim, not a result. And its first version logged the
+first five IDR reads of any port, which were all port F: the keypad port was never in view, and the instrument
+looked like it was working while measuring the wrong thing. Counting per port rather than taking the first few
+overall is what turned that into the number above.
+
+Next: put the machine's keypad cell mapping beside App/driver/keyboard.c's keyboard[5][4] table and find the
+disagreement. That is a comparison of two small tables, and it is now the only thing between this and a key that
+arrives.

@@ -282,6 +282,24 @@ static uint64_t py32_gpio_read(void *opaque, hwaddr addr, unsigned size)
                 /* ROUND 102-103: only when a row line is actually low -- that is what
                  * read_rows() would return non-idle. Bounded on purpose; see round 98. */
                 static int idle_env = -1, hits = 0;
+                /* Sanity: count IDR reads per port, and log the keypad port's first few. */
+                {
+                    static int seenb = 0;
+                    static unsigned long readsb = 0, reads_other = 0;
+                    if (s->port_name && (s->port_name[0] == 'b' || s->port_name[0] == 'B')) {
+                        readsb++;
+                        if (seenb < 5) {
+                            seenb++;
+                            fprintf(stderr, "ROWSEENB n=%d readsb=%lu moder=0x%08x idr=0x%08x odr=0x%08x v=0x%08x\n",
+                                    seenb, readsb, s->moder, s->idr, s->odr, v);
+                        }
+                    } else {
+                        reads_other++;
+                    }
+                    if (((readsb + reads_other) % 1000000UL) == 0 && readsb) {
+                        fprintf(stderr, "ROWCOUNT idr_reads_b=%lu idr_reads_other=%lu\n", readsb, reads_other);
+                    }
+                }
                 if (idle_env < 0) idle_env = getenv("UVK5_ROW_PROBE") ? 1 : 0;
                 if (idle_env && (v & 0xf000u) != 0xf000u) {
                     hits++;
