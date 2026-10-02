@@ -1316,6 +1316,25 @@ there is exactly one, and it is correct in every field:
         tx_cndtr=2568 rx_cndtr=2568
 
 2568 bytes, destination exactly the overlay at 0x20000280, receive address incrementing, both channels agreeing
+
+**Round 54: the flash model's own data is correct, and so is the DMA -- so the six bytes are written after the transfer.**
+
+The read path in the model is three lines and returns s->data[(s->addr++) % PY25Q16_SIZE], and the model keeps that
+2 MB in RAM and writes it back on exit. So the file a run leaves behind is what the model believed the flash held,
+and comparing it with the app settles the flash side: flash-r52.img and flash-r53.img both hash to the app's own
+60234c72 with zero differing bytes at slot 1's code offset. The flash model hands back the right bytes.
+
+Round 53 already showed the DMA run is right: count=2568, rx_addr=0x20000280 (the overlay), rx_inc=1, both counts
+equal. So the transfer wrote the correct 2568 bytes to the correct place.
+
+Yet the guest's overlay ends up with 40 d6 01 08 28 0a at offsets 2444..2474 where the app has zeros -- and at
+code_size - 124 for both sizes measured. A value that is a firmware flash address, at a position that only the
+loader and the DMA know about, is what a staged write or an interrupt handler's frame would look like. The next
+instrument is to have the DMA probe dump the bytes it actually wrote in that window, which separates "the
+transfer wrote them" from "something wrote them afterwards" in one run.
+
+Worth stating plainly, because it has cost several rounds: three separate instruments now agree that both the
+source bytes and the transfer are correct, so every earlier reading of this as a flash or DMA fault is retired.
 on the count. So the DMA delivers everything to the right place.
 
 The overlay nevertheless ends up with six wrong bytes, at offsets 2444, 2445, 2446, 2447, 2451 and 2474 -- and the
