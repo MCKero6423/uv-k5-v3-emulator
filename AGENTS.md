@@ -3307,3 +3307,33 @@ Next: read K5VIEWER_ParseInput and the state it writes, and find why a pending s
 life of an overlay app. If the answer is that it only survives when there is nothing on the serial port at all,
 the hand-started emulators in this session were all in that state -- which is worth knowing but would not explain
 the page's own instance, and that distinction is the next thing to measure rather than assume.
+
+**Round 99: the serial branch is not it, and the 1.68 million calls say the scan IS running.**
+
+Round 98 concluded that something left a pending serial key set for the life of an overlay app, and the early
+return at the top of KEYBOARD_Poll took every poll. Reading the injection path refutes that.
+
+    static inline void KEYBOARD_InjectKey(uint8_t keyCode, bool keyLong)
+    {
+        if (keyCode < KEY_INVALID && keyCode != KEY_PTT) {
+            gKeyFromSerial      = (KEY_Code_t)keyCode;
+
+gKeyFromSerial is written in exactly one place, and that place is reached only from KEYBOARD_ProcessProtocolByte's
+STATE_KEY_3 / STATE_KEY_3L, which is the 0xAA 0x55 0x03 <code> frame a host sends over the serial link. Nothing
+in the emulator sends it, and nothing in the firmware's own paths sets it. So the branch never fires, and the
+scan below it does run.
+
+The second correction is to a number I misread last round. 1 682 600 calls to keypad_update_rows() is not
+evidence of something else happening: it is the scan, and it is the strongest evidence yet that the columns are
+being driven hard. The sampled lines showed colhigh=0x1e because the driver sets every column back high when it
+is not selecting one, and a sample every twenty thousand calls landed in those gaps. A probe that samples a
+periodic signal at a fixed multiple of its own period will keep missing the part that matters -- the same family
+of mistake as measuring a 100 ms event with a 100 ms tick.
+
+So the position is now: the scan runs, the model holds the key at column 3 row 0, and the model's own condition
+is satisfied -- when column 3 is pulled low, row 0 goes low -- yet the firmware never sees a key. The break is
+one link further along, between the model's row lines and what the firmware reads back: read_rows(), PIN_ROWS,
+and the GPIO wiring in between.
+
+That is the next thing to read and then to measure, in that order -- and the measurement, when it comes, has to
+sample the row lines while a column is actually selected rather than at a fixed call count.
