@@ -726,6 +726,29 @@ So the user-visible symptom ("cannot get into the program") is the key press doi
 the only way to test an overlay app is to run the Labs build itself. Measure through the page, not through a
 hand-started QEMU: it is the instance that draws, and its endpoints are the same ones the browser uses.
 
+**Reproduced on the page's own instance, with its own endpoints: the app menu works, and MENU on a row leaves the
+launcher and never runs the app.**
+
+The page was healthy for this run (pristine dump restored: 485 lit bytes, four apps installed and confirmed by
+0x0730). Driving /api/key and reading /api/panel:
+
+* F then 7 **does** open the menu -- ink 1810 -> 1976, a boxed title over the slot list.
+* DOWN x3 **does** move the selection -- ink 1976 -> 1832, and the list's text changes.
+* MENU on the app row drops the screen to the title box alone (ink 1832 -> 210), and from then on MENU, DOWN, UP
+  and F all change nothing: the app neither draws nor reads keys.
+* EXIT brings the menu back (ink 1832), so the firmware did enter and leave the launcher.
+
+So the wall is between the launcher and the app, and it is not about the app's own code (a 16-byte app that calls
+nothing behaves the same) or its header (Breakout's is field-for-field identical in shape). The screen state --
+title box only, keys dead, EXIT returns -- is what a launcher that has taken over the screen and then never
+reaches the app looks like.
+
+Two measurement notes for whoever continues this. Restore the pristine dump (work/user-flash.img) before testing:
+the working copy that carries the adopted FMP3 marker (image_crc32 0x9d27c3db rather than 0x4d87ce48) comes up
+with the panel blank or showing only its boot screen, and keys then do nothing -- which is what several earlier
+rounds mistook for the app's failure. And never hand-start QEMU for this: the hand-started instances came up
+without a picture, while the page's own instance draws.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and
