@@ -2405,3 +2405,27 @@ a second while the code is loaded once, so nothing the loader writes can survive
 The next measurement needs no disassembler: at the 1200 hits the stack pointer is 0x20003c50, so reading the
 words above it gives the whole return-address chain and therefore who calls the routine that calls memset. One
 run of that names the retry loop.
+
+**Round 61: the call chain is 0x080175fe -> 0x08016ff0 -> 0x0801701a -> memset, and it runs about a hundred times a second.**
+
+Reading the stack words at the watchpoint hits -- stack pointer 0x20003c50 -- gives the same chain every time:
+
+    PC=0x0801ae7a (inside memset, entry 0x0801ae70)  SP=0x20003c50
+    return addresses on the stack: 0x080047ca  0x080175fe
+
+So 0x080175fe calls the routine whose prologue is at 0x08016ff0, which calls memset(0x20000280, 0, 0x1000) from
+0x0801701a. That is the whole path, and it is taken about a hundred times a second.
+
+A caveat that matters, and that I should have stated earlier: the sources I have been quoting -- app_overlay.c,
+py25q16.c, radio.c -- were fetched from armel/uv-k1-k5v3-firmware-custom's main branch, while the image running
+here is f4hwn's build. They need not be the same lineage, so "this routine is APP_LaunchOverlay" and "that
+memset is the launcher's own" are inferences from those files, not facts about this image. Nothing in the last
+few rounds that rests on a fetched source should be treated as proven.
+
+What is measured, and independent of any source: a routine at 0x08016ff0 is entered about a hundred times a
+second and each time zeroes the whole 4 KiB overlay through memset, while the code itself is read into that
+overlay exactly once. Whatever the routine is called, nothing the loader writes can survive it, which is why a
+24-byte app passes its CRC check and a 2568-byte one does not.
+
+Next: identify 0x080175fe and 0x080047ca against the image itself rather than against a fetched file -- for
+instance by looking at what each calls and returns -- or fetch the sources for the exact build being run.
