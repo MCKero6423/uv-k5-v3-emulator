@@ -923,6 +923,24 @@ path that treats a key as EXIT. So get_key() is not returning the APP_KEY_* valu
 or the keys are not reaching it as sent. The cheap way to find out is to have the app draw the raw key code
 it receives and read it off the panel, rather than guessing at the mapping.
 
+**Round 18-19: the raw-key probe never ran, and the contrast narrows input to one call.**
+
+Two font-free probes were built to draw the raw key code they receive (a marker bar on row 2, five bits on
+row 20) and both left the panel byte-identical across seven key presses -- 26 lit pixels on row 2 and a
+constant pattern on row 20, which is the launcher's own frame. So neither probe painted at all.
+
+The useful part is the contrast: an app of the same shape that fills the framebuffer through api->fb and
+blits (FillFb, round 17) does paint -- 43 non-zero bytes to 596 -- and the only substantive difference
+between it and these probes is that the probes call api->get_key() every pass. Put beside the round-17
+result, where the full Minesweeper painted a complete frame and then vanished the moment a key was pressed
+(the panel returned to the launcher's title box, which happens on the path that treats a key as EXIT), the
+picture is that the app runs and draws, and the key path is what ends it.
+
+That is where input stands, and it is one call wide: get_key() in an overlay app. The sector-cache question
+comes back with it -- the key path is a plausible place for the firmware to reach the external flash -- but
+the font reads that print_tiny provokes do not kill the app, so this is specific to the key path rather
+than to flash reads in general.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
