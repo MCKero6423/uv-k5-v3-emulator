@@ -980,6 +980,25 @@ So the input question reopens on solid ground: the game does run and paint when 
 the remaining unknown is what the keys do inside the running app, with the launch sequence now known to be
 F, 7, DOWN (to select), MENU (to run).
 
+**Round 22-23: the image is restored and healthy; the launch itself will not reproduce today.**
+
+After a day of app installs the working copy was no longer the image that worked in round 17, so the pristine
+dump was put back with the emulator powered off first (exit writes the in-memory image back over the file).
+The page now comes up on its own main screen -- 485 non-zero bytes, the healthy case -- and Minesweeper is
+installed in slot 3 at 2444 bytes, which is the same artifact that painted a complete frame in round 17.
+
+What will not reproduce is the launch. F, 7, DOWN, MENU -- and a second MENU -- leave the radio on the app
+menu: it is drawn completely (title box, six rows, a highlighted bar, ink 1799) and it stops responding to
+keys altogether, with the same reading before and after every press. Round 17 measured the game's own frame
+from this same app, this same slot and a press sequence of F, 7, DOWN x3, MENU, so the app is not in
+question; what differs is the launcher's own key handling on the way in.
+
+That is the state the keypad section already describes in another form -- a launcher that has taken over the
+screen and then does not reach the app -- and it is now the single open item. Note it in the same breath as
+the deliberate correction above it: the earlier attempt at this round blamed the app, and the A/B that
+removed the instrumentation and rebuilt the round-17 source did not bring the frame back, which is what moved
+the suspicion to the launcher and the image rather than the app.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
