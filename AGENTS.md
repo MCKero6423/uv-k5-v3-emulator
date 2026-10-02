@@ -1122,6 +1122,27 @@ launched.
 
 Next: read the launcher's own acceptance test out of the firmware instead of guessing at it. The header fields
 are the obvious first place -- caps, api_min, abi, entry_off, flags -- and the difference between the header
+
+**Round 30: the app runs in the overlay and never calls the firmware once -- so it never reaches draw().**
+
+Two measurements settle where the failure is. The firmware itself was asked about both apps over 0x0730
+through the page's own endpoint, and it answers status 0 for all eight installed slots, the 2444-byte game and
+the 256-byte toy alike. So round 29's reading of the launcher as refusing some apps is wrong: it accepts both,
+and the refusal claim is withdrawn.
+
+Then the launch was measured with the instruments instead of the screen. With the key.py timing (hold_ms 200
+plus a 400 ms gap, which round 29 showed is what makes the sequence coherent), MENU drops the panel to 43 --
+the launcher's box -- within one second and it stays there. The 2 ms PC probe records 51 samples inside the
+4 KiB overlay out of 11439, spread over about ten distinct addresses in the first 1.5 KB of the app, so the
+app is executing its own code. The flash probe says something sharper: the app's code load (addr=105000
+len=2444) is the last transaction of the whole session, with zero flash transactions after it, and therefore
+no font reads at all. print_tiny is only ever called from draw(), so draw() is never reached: the app runs,
+stays in its own code, and never calls the firmware.
+
+The one loop on that path which can spin without touching the firmware is place_mines(), which draws random
+cells with a reject and no upper bound. It is now capped at 4000 attempts with a deterministic fallback that
+fills from the start of the board, so a board that cannot be drawn randomly is still a board -- and, more to
+the point, a hang there can no longer masquerade as an app that never started.
 this page writes and the one an upstream app carries is the thing to diff.
 
 That is where the next round starts: the same alternating-spin shape, one call at a time.
