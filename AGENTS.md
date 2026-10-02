@@ -790,6 +790,24 @@ Next instrument, and it needs a one-line model change rather than more guessing:
 100 ms, which is the same order as the app's whole life. Dropping that interval to a couple of milliseconds
 turns it into a real trace and would show where in the overlay the app stops.
 
+**The PC probe's interval is now a knob (UVK5_PC_PROBE_MS), and at 2 ms the overlay app's whole life is one tick.**
+
+100 ms was the same order as the thing being measured: an app that the launcher starts and that is gone again
+before the next sample. uvk5_pc_probe_interval_ms() reads UVK5_PC_PROBE_MS and falls back to 100, so every
+existing probe run is unchanged. At 2 ms, a launch gives 468 samples in about 0.94 s and **exactly one of them
+is inside the 4 KiB overlay** -- the app runs for roughly 2 ms, not 100.
+
+With a real trace in hand, two things are now settled and one is new. Settled: the loader copies and jumps (the
+single overlay sample), and a 16-byte app that calls nothing stays there forever. Settled the other way: the
+sector-cache overwrite is dead -- the flash log's **last** transaction for the run is the app's own code load
+(addr=103000 len=2408) and **nothing follows it**, no font read included. New: after the app dies the firmware
+sits in a loop inside its own flash (PCs around 0x08005118/0x08005122/0x08005248) with **zero flash reads and
+no key response at all** -- even F then 7 no longer opens the menu, and an explicit MENU down/up changes
+nothing. So the launcher (or the fault path it takes) is wedged, not merely waiting for a release.
+
+That is where the next round starts: the app dies within about 2 ms, the firmware never reads the flash after
+loading it, and what is left running is a tight loop in the firmware with no display or key activity.
+
 ## The keypad: two real bugs, both fixed
 
 The old note here said "keys reach the firmware but the UI does not react" and

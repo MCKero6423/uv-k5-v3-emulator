@@ -3609,6 +3609,19 @@ static uint32_t uvk5_sniff_app_offset(const char *path)
  * can be located without a debugger (a gdb attach stops the guest, which is the
  * one thing that must not happen while working out where it stopped).
  */
+/*
+ * How often the PC probe samples. 100 ms is fine for finding a hang, but an overlay
+ * app's whole life can be shorter than that -- the launcher takes the screen and the app
+ * is gone again before the next tick -- so UVK5_PC_PROBE_MS lets a run ask for a real
+ * trace instead of a few points. The default keeps every existing probe run identical.
+ */
+static int uvk5_pc_probe_interval_ms(void)
+{
+    const char *v = g_getenv("UVK5_PC_PROBE_MS");
+    int ms = v ? atoi(v) : 0;
+    return ms > 0 ? ms : 100;
+}
+
 static void uvk5_pc_probe_tick(void *opaque)
 {
     UVK5MachineState *s = opaque;
@@ -3620,7 +3633,7 @@ static void uvk5_pc_probe_tick(void *opaque)
             fclose(f);
         }
     }
-    timer_mod(s->pc_probe_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+    timer_mod(s->pc_probe_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + uvk5_pc_probe_interval_ms());
 }
 
 static void uvk5_boot_key_release(void *opaque)
@@ -3800,7 +3813,7 @@ static void uvk5_machine_init(MachineState *machine)
     uvk5_arm_boot_key(s);
     if (g_getenv("UVK5_PC_PROBE")) {
         s->pc_probe_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, uvk5_pc_probe_tick, s);
-        timer_mod(s->pc_probe_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+        timer_mod(s->pc_probe_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + uvk5_pc_probe_interval_ms());
     }
     qdev_connect_gpio_out_named(DEVICE(&s->soc.gpio[0]), "pin-out", 3,
                                 qdev_get_gpio_in_named(DEVICE(&s->flash),
