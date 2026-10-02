@@ -3310,6 +3310,11 @@ struct PY32F071State {
      */
     uint32_t app_offset;
     MemoryRegion container;
+    /* Diagnostic write probe over eight bytes of SRAM; see py32_ram_probe_write. */
+    MemoryRegion ram_probe;
+    bool ram_probe_active;
+    /* Base address of the write probe, so its stores can be forwarded correctly. */
+    uint32_t ram_probe_base;
     /* An address space over `container`, so DMA sees the same map as the CPU. */
     AddressSpace dma_as;
 };
@@ -3408,6 +3413,62 @@ static void py32f071_soc_init(Object *obj)
     }
 }
 
+/*
+ * Diagnostic write probe (UVK5_RAM_PROBE=0xADDR): log every CPU store into the
+ * eight bytes at ADDR together with the PC that made it, then forward the write
+ * to the real RAM so nothing changes for the guest.
+ *
+ * It exists because a gdb watchpoint on the same address halts the guest on every
+ * hit, and the address under study sits inside a region the firmware memsets about
+ * a hundred times a second -- so the watchpoint stopped the very launch being
+ * measured (rounds 63-66). The guest never stops here.
+ */
+static void py32_ram_probe_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
+{
+    PY32F071State *s = opaque;
+    CPUState *cpu = current_cpu;
+    uint32_t pc = 0;
+
+    if (cpu) {
+        pc = (uint32_t)ARM_CPU(cpu)->env.regs[15];
+    }
+    fprintf(stderr, "RAMPW pc=%08x off=%u val=%0*" PRIx64 " size=%u\n",
+            pc, (unsigned)addr, (int)(size * 2), value, size);
+
+    /*
+     * Forward to the real SRAM: the probe observes, it does not intercept. `addr` is
+     * relative to this subregion, so the offset inside sram is the base of the probe
+     * minus the base of sram, plus addr. Passing addr alone (the first version of
+     * this) wrote to 0x20000000..7 and killed the guest.
+     */
+    memory_region_dispatch_write(&s->sram,
+                                 (s->ram_probe_base - PY32_SRAM_BASE) + addr,
+                                 value, size, MEMTXATTRS_UNSPECIFIED);
+}
+
+/*
+ * The probe region is an io region overlapped over RAM, so it intercepts reads as
+ * well as writes. Without this handler every read of those bytes returned zero, the
+ * firmware read zeros where it expected its own data, and the guest died -- the first
+ * version of the probe had exactly that bug.
+ */
+static uint64_t py32_ram_probe_read(void *opaque, hwaddr addr, unsigned size)
+{
+    PY32F071State *s = opaque;
+    uint64_t value = 0;
+
+    memory_region_dispatch_read(&s->sram, (s->ram_probe_base - PY32_SRAM_BASE) + addr,
+                                &value, size, MEMTXATTRS_UNSPECIFIED);
+    return value;
+}
+
+static const MemoryRegionOps py32_ram_probe_ops = {
+    .read = py32_ram_probe_read,
+    .write = py32_ram_probe_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+};
+
 static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
 {
     PY32F071State *s = PY32F071_SOC(dev_soc);
@@ -3436,6 +3497,28 @@ static void py32f071_soc_realize(DeviceState *dev_soc, Error **errp)
         return;
     }
     memory_region_add_subregion(&s->container, PY32_SRAM_BASE, &s->sram);
+
+    /*
+     * Optional write probe over eight bytes of SRAM. Overlaps the SRAM at a higher
+     * priority, logs the store, and forwards it, so the guest is never halted --
+     * which a gdb watchpoint cannot promise. Off unless UVK5_RAM_PROBE names an
+     * address inside SRAM.
+     */
+    const char *probe = g_getenv("UVK5_RAM_PROBE");
+    if (probe && *probe) {
+        uint32_t at = (uint32_t)strtoul(probe, NULL, 0);
+
+        if (at >= PY32_SRAM_BASE && at + 8 <= PY32_SRAM_BASE + PY32_SRAM_SIZE) {
+            memory_region_init_io(&s->ram_probe, obj, &py32_ram_probe_ops, s,
+                                  "py32f071.ram-probe", 8);
+            memory_region_add_subregion_overlap(&s->container, at, &s->ram_probe, 1);
+            s->ram_probe_base = at;
+            s->ram_probe_active = true;
+            fprintf(stderr, "RAM probe watching 8 bytes at 0x%08x\n", at);
+        } else {
+            fprintf(stderr, "UVK5_RAM_PROBE=0x%08x is outside SRAM; probe disabled\n", at);
+        }
+    }
 
     /* Core. The firmware's vector table has 53 entries; round up for the NVIC. */
     qdev_prop_set_uint32(DEVICE(&s->armv7m), "num-irq", PY32_NUM_IRQ + 16);

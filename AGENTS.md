@@ -2530,3 +2530,30 @@ The fix is a write callback in qemu/py32f071.c over those four bytes -- memory_r
 memory_region_add_subregion_overlap, logging the PC and then forwarding to RAM -- so the guest never stops.
 The gdb watchpoint cannot be made conditional: the remote protocol's Z2 has no condition in this stub, and
 the address cannot be moved out of the memset's range because the damage is inside it.
+
+**Round 67: the write probe moves into the model, and the launch happens under it -- after two bugs in the probe itself.**
+
+The probe is a small io region overlapped over eight bytes of SRAM (UVK5_RAM_PROBE=0xADDR), whose
+write handler logs the PC and the value and then forwards to the real RAM. No gdb, so the guest never
+halts. With it watching 0x20000C0C and the app launched as usual:
+
+    +0.05s  2568/2568      the overlay holds the app's code exactly
+    +0.10s  2567/2568      one byte differs
+    +0.15s .. +0.25s  2567/2568
+    best 2568/2568 -> launch HAPPENED
+    RAMPW lines: 21
+
+Two bugs in the probe came first, and both matter to anyone writing another one.
+
+An io region overlapped over RAM intercepts reads as well as writes. With no read handler it answered
+zero for those eight bytes, so the firmware read zeros where it expected its own data and the guest died
+-- the QMP connection reset midway through every run. The read handler forwarding to SRAM fixed it.
+
+And the write handler must add the probe's own base: the address a subregion's callback receives is
+relative to that subregion, so forwarding it unchanged wrote to 0x20000000..7 instead of 0x20000C0C..13,
+which is a fine way to corrupt the lowest eight bytes of a guest's RAM.
+
+With the probe working, the window shows the shape of the problem: the launch is byte-perfect at +0.05 s
+and one byte is wrong 50 ms later. The probe logged 21 stores into those eight bytes -- eight from
+0x0801ae7a and eight from 0x08004874, both writing zero, plus five more that the summary cut off. Those
+five are the ones to read next: they are the only remaining candidates for the byte that changes.
