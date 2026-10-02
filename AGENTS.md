@@ -1236,6 +1236,28 @@ picture. That is what the page draws from, and it needs neither the page nor a p
 
 Before the keys: 485 non-zero bytes, the radio's own main screen, with F4HWN and the big digits legible in the
 render. After MENU: 43 non-zero bytes, and the render is a single boxed title about 42 columns wide and seven
+
+**Round 42: the panel's memory is frozen at the launcher's box, and that contradicts the panel probe.**
+
+Read the controller's display RAM eight times over thirty-five seconds on one QMP connection, with no probe on:
+485 non-zero before the keys, 43 at t+2 s, and then the same 43 -- identical md5, not one byte different -- at
+t+5, t+10, t+15, t+20, t+25, t+30 and t+35 s. The app's screen never appears, and nothing repaints the box.
+
+That cannot be reconciled with rounds 39 and 40, where the panel probe recorded 114028 pixel-data transfers
+after the keys, 105 full-screen writes from the toggling app and Minesweeper's glyph bytes among them. Both
+instruments cannot be right. The probe is the suspect, and for a concrete reason: it opens, writes and closes
+its file once per byte, on the vCPU thread, so it is slow enough to change the timing of the thing it watches --
+and this file already carries the lesson in another form (a probe can create the behaviour it measures; and a
+probe that cannot show the event it looks for will report zero). The transfer-count conclusion is therefore
+withdrawn until the count is taken without per-byte file I/O.
+
+What is not in doubt is what the glass shows, because it comes from the controller's own memory and needs no
+probe at all: after the launcher hands over, the screen is the launcher's title box (43 non-zero bytes, the
+signature this file recorded for that box) and it stays that way. So the app does not paint, which agrees with
+what rounds 32 to 35 concluded from other evidence before round 39 overturned it.
+
+Next: make the panel probe accumulate in memory and write once at exit, then re-run the launch. That is the
+only way to compare the two instruments honestly, and it decides whether the app is drawing at all.
 rows tall near the top with text inside it, and fifty-seven empty rows below. That is precisely the picture the
 user described -- a title label over one blank box -- so the symptom is now reproduced from the glass itself
 rather than inferred from transfer counts.
