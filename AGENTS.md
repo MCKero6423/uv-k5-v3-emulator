@@ -2479,3 +2479,28 @@ cannot tell the writer was not the memset from nothing was written at all.
 Two smaller things are now known and worth keeping. The memset writes one byte per hit, so during a pass the
 watched word is transiently part-written; and reading memory at every hit costs a gdb round trip, which is why
 four thousand hits took most of the window. The next attempt should verify the corruption first, then watch.
+
+**Round 64: the control proves the harness is intermittent -- on this run the app was never loaded at all.**
+
+Running the watchpoint and the control in one run, and only reading memory on hits whose PC is not the
+memset's, gives:
+
+    hits seen 400  (memset 400, other 0)
+    CONTROL: overlay crc 169b5c51 (app 60234c72), matching 262/2568
+       differs at +0: overlay 00, app f0
+
+The overlay is all zeros. The app was never copied into it on this run, and the 262 bytes that do match are
+simply the app's own zero bytes coinciding. So round 63's zero result is fully explained: there was nothing to
+observe. That is the failure mode predicted and written down last round, and the control caught it.
+
+The cause is in the measurement harness, not the model. The same key sequence -- F, 7, DOWN, MENU -- did launch
+the app in round 62, where the overlay briefly held the code byte for byte. Here it did not. The sequence is
+timing-sensitive, and every conclusion drawn from a run that did not verify the launch is vacuous, including
+'the memset is the only writer'.
+
+The fix is to make the harness deterministic before watching anything: press the keys, then poll the overlay
+until it matches the app (or fail loudly after a deadline), and only then arm the watchpoint. The control
+already exists; it just has to run before the measurement rather than after it.
+
+This is the same rule the file has carried for many rounds in other words -- a measurement must be able to show
+the thing it is looking for -- applied to the launcher step that all of these runs depend on.
