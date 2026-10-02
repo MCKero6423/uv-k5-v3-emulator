@@ -1185,6 +1185,26 @@ the hypothesis this file recorded one round ago.
 The panel is on SPI1 and the flash on SPI2 -- the model says so in as many words ("SPI2, not SPI1:
 App/driver/py25q16.c uses SPI2 and st7565.c uses SPI1") and wires st7565_xfer to s->soc.spi[0]. A blit
 therefore cannot touch the external flash at all, so round 34's sector-cache-overwrite mechanism is dead
+
+**Round 36: the panel probe is in the binary but not in the environment, and I killed the page by mistake.**
+
+The page had to be replaced to put UVK5_PANEL_PROBE into the emulator's environment, and the way I went
+about it cost the user their running page: the port owner of 8080 was the managed launcher job, so killing
+it took the page down. It was restored immediately as a managed background job and verified healthy -- main
+screen 485 -- and this time it is a job, so it will not be lost the same way.
+
+The instrument itself is fine. The running qemu-system-arm.exe contains UVK5_PANEL_PROBE and the literal
+"PANEL a0=", and it was built after the source was last modified, so the model's panel probe is in the
+binary that is executing. No panel.log appears anywhere in the repo or the build tree, which means the
+variable is simply not in that process's environment: run-webui.ps1 passes only --qemu, --elf and --flash,
+and tools/webui.py has no env= dict in the paths looked at, so the spawn site that builds QEMU's environment
+is still unread -- most likely tools/uvk5_supervisor.py.
+
+Two process-inspection traps are worth recording, both hit here: Get-CimInstance and Get-Process return
+nothing in this sandbox (no python and no qemu process were listed while the page was plainly answering on
+8080), while netstat -ano and taskkill work; so the port owner came from netstat. And a second page instance
+started while the first is running dies without a word, because the port is taken -- which is exactly how two
+earlier restart attempts failed silently.
 and is withdrawn. That also agrees with the flash probe, which saw no transactions after the app's code
 load: there was nothing there to see.
 
