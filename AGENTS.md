@@ -886,6 +886,26 @@ the last mile.
 Next: the same variant harness on the three pieces of draw() separately (the header text, the 81-cell loop, the
 cursor), each with the loop spin that the surviving apps have.
 
+**Round 16: draw()'s halves are each fine, and the app is running -- so the next suspect is the blit itself.**
+
+Using the validated shape (for(;;) { long spin; one piece; }) the header block (display_clear + four print_tiny
+calls, the long strings and x=122 included) scores 26.1% and the 81-cell loop plus the cursor, written with local
+variables only, also scores 26.1% -- both the same as the control, so both are alive.
+
+The full Minesweeper, measured the same way, is running: 116 samples inside it over fifteen seconds, spread over
+eight distinct addresses (its spin at 0x200002e8/0x200002ec, plus 0x2000035a, 0x20000400, 0x20000564, 0x20000488
+and others), with the firmware still serving it -- 1024 font-region reads appear during the launch. Yet the panel
+never leaves the launcher's title box over ninety seconds, and that box is drawn before the app is entered, so
+nothing the app paints has ever reached the glass. Removing the opening settle spin changed nothing, which also
+retires the earlier idea that the app was simply still inside that spin.
+
+So the app runs, calls into the firmware, and never completes a frame. That leaves two candidates and one of them
+has never been checked: the statics (draw() reads g_cursor, g_state, g_mine_left, g_open, g_flag and g_mine, the
+only inputs the two surviving variants did not touch), and **whether blit_full from an overlay app reaches the
+panel model at all** -- the gutted variant was only ever measured by its PC share, never by what its screen showed.
+The second is cheap to settle: an app that does nothing but display_clear plus blit_full should visibly erase the
+launcher's title box.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
