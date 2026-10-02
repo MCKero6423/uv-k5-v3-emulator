@@ -804,6 +804,57 @@ static void st7565_set_cs(void *opaque, int line, int level)
     s->selected = !level;
 }
 
+/*
+ * The panel probe, accumulated in memory and written a buffer at a time.
+ *
+ * It used to open, write and close the file once per byte. That ran on the vCPU thread,
+ * so the probe was slow enough to change the timing of the very thing it was watching --
+ * and the transfer counts it reported could not be reconciled with the panel's own
+ * memory (which is written only through this same function). Nothing here touches a file
+ * until a buffer fills, and the tail is dumped at exit.
+ */
+static char    *panel_probe_buf;
+static size_t   panel_probe_len;
+static unsigned panel_probe_n;
+static const char *panel_probe_path;
+
+static void panel_probe_flush(void)
+{
+    FILE *f;
+
+    if (!panel_probe_path || !panel_probe_len) {
+        return;
+    }
+    f = fopen(panel_probe_path, "ab");
+    if (f) {
+        fwrite(panel_probe_buf, 1, panel_probe_len, f);
+        fclose(f);
+    }
+    panel_probe_len = 0;
+}
+
+static void panel_probe_add(int a0, int cs, int page, int col, uint8_t out)
+{
+    if (!panel_probe_path) {
+        panel_probe_path = g_getenv("UVK5_PANEL_PROBE");
+        if (!panel_probe_path) {
+            return;
+        }
+        panel_probe_buf = g_malloc(1 << 20);
+        atexit(panel_probe_flush);
+    }
+    if (panel_probe_n >= 2000000u) {
+        return;
+    }
+    if (panel_probe_len + 64 > (1 << 20)) {
+        panel_probe_flush();
+    }
+    panel_probe_len += snprintf(panel_probe_buf + panel_probe_len,
+                                (1 << 20) - panel_probe_len,
+                                "PANEL a0=%d cs=%d page=%d col=%d byte=%02x\n",
+                                a0, cs, page, col, out);
+    panel_probe_n++;
+}
 static uint8_t st7565_xfer(void *opaque, uint8_t out)
 {
     ST7565State *s = opaque;
@@ -811,19 +862,8 @@ static uint8_t st7565_xfer(void *opaque, uint8_t out)
      * controller, bounded, but high enough that a boot plus a launch is not cut off (2000000 transfers; the old value, 40000, was reached about forty seconds after boot, so anything measured after a launch was invisible). Two firmware builds that
      * disagree about the column offset or the scan direction render differently, and
      * this is how that is measured rather than guessed. */
-    {
-        const char *panel_probe = g_getenv("UVK5_PANEL_PROBE");
-        static unsigned panel_probe_n;
-        if (panel_probe && panel_probe_n < 2000000) {
-            FILE *f = fopen(panel_probe, "a");
-            if (f) {
-                fprintf(f, "PANEL a0=%d cs=%d page=%d col=%d byte=%02x\n",
-                        s->a0, s->selected, s->page, s->col, out);
-                fclose(f);
-            }
-            panel_probe_n++;
-        }
-    }
+    /* In memory, flushed a buffer at a time -- see panel_probe_add. */
+    panel_probe_add(s->a0, s->selected, s->page, s->col, out);
 
     if (!s->selected) {
         return 0xff;

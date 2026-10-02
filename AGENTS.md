@@ -1245,6 +1245,28 @@ t+5, t+10, t+15, t+20, t+25, t+30 and t+35 s. The app's screen never appears, an
 
 That cannot be reconciled with rounds 39 and 40, where the panel probe recorded 114028 pixel-data transfers
 after the keys, 105 full-screen writes from the toggling app and Minesweeper's glyph bytes among them. Both
+
+**Round 43: with the probe fixed, the two instruments agree exactly -- and the app never runs.**
+
+The panel probe no longer opens, writes and closes a file once per byte; it accumulates in memory and writes a
+buffer at a time, with the tail dumped at exit. Nothing else changed. The transfer volume went from 28416
+pixel-data lines to 1930061 -- sixty-eight times more -- which is the measure of how much the old probe was
+suppressing the guest. So it was perturbing what it watched, and its readings about volume were not usable.
+
+With that fixed, the pictures match. Replaying the model's own store rule over the whole transfer log (a0=1,
+col in 4..131, gram[page & 7][col - 4] = byte) and then counting non-zero bytes gives 43 -- exactly what the
+gram property reported, and its md5 agrees with the frozen frame read in round 42. Every one of the 1.93 million
+pixel bytes is accounted for, and the writes cover all eight pages and all 128 columns, so nothing is dropped
+and no page is left stale.
+
+That settles what the box is. The firmware is not failing to draw: it is redrawing the same screen -- 43 lit
+bytes, the launcher's own title box -- about nineteen thousand times. Which is also why the zeros dominate the
+stream (that screen is almost all zeros) and why the glyphs that round 40 read as Minesweeper's frame are
+41, 40 and 7f: the launcher's own characters, sent over and over.
+
+So rounds 39 and 40 were reading the launcher and calling it the app, and rounds 32 to 35 were right: after the
+handover the app does not run. The instrument is honest now, the model is exonerated, and what is left is the
+one thing this file has been circling: the launcher takes over the screen and never reaches the app.
 instruments cannot be right. The probe is the suspect, and for a concrete reason: it opens, writes and closes
 its file once per byte, on the vCPU thread, so it is slow enough to change the timing of the thing it watches --
 and this file already carries the lesson in another form (a probe can create the behaviour it measures; and a
