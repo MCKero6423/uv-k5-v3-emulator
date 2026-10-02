@@ -1263,6 +1263,30 @@ one inside that 4 KiB -- the CPU never enters the app -- and the samples sit at 
 probe's last transaction is the app's code read (addr=105000 len=2744, first bytes f0b59bb0...), with nothing after it.
 
 0x08005118 decodes as a PY32 SPI byte transfer: movs r2,#2; ldr r3,[pc] (=0x40013000); poll [r3+8] bit 1 (TXE);
+
+**Round 46: the app's first instruction never executes -- entry() is never reached, and the hang is in RADIO_SetupRegisters.**
+
+A 24-byte app whose first instruction stores 0xDEADBEEF at a fixed address settles the question with no inference at
+all. Installed in slot 0 (code 24 B, entry_off 0, vma 0x20000280) and launched with F, 7, DOWN, MENU, the address
+reads back as all 0xFF at t+2, +5, +10 and +15 s and never as 0xDEADBEEF. The app's entry point is therefore
+never executed: APP_LaunchOverlay does not reach its entry(&app_api) call at line 1162.
+
+That closes the bracket. Between the copy at line 1113 and the call at line 1162 the function's only return is the
+CRC check at line 1115 -- and the CRC is right (MB_Crc32Bytes is an ordinary CRC-32 and the host tool's value is
+exactly what it computes). So the function cannot be returning early: it is stuck in between, and the only
+hardware-touching statement there is RADIO_SetupRegisters(true) at line 1159. The PC sitting in the PY32 SPI
+routine at 0x08005118, and the panel memory frozen at the launcher's box, both agree.
+
+One honest note about the method: the address I picked, 0x20003F00, is not free -- it sits just under the top of
+SRAM and the firmware was using it (it read as a pointer and some flags before the launch, and as stack bytes
+after). The marker test is unaffected, because a magic word that never appears is proof the instruction never
+ran, but the free-address assumption behind it was mine and was wrong.
+
+Also this round: the FillFF variant from round 40 now builds. Its build script had been rewriting the compiler's
+own arguments; the documented command line is used directly instead, with the include path and a copy of
+app-resolved.ld, and both new apps compile with no warnings.
+
+Next: fetch RADIO_SetupRegisters and follow what it touches, one call at a time, against the model.
 strb to [r3+12] (DR); poll bit 0 (RXNE); read DR. The model's own comment confirms the layout (CR1 0x00, SR 0x08,
 DR 0x0C) and keeps TXE asserted, so this is not a hang on a missing flag -- the firmware is doing transfers, which
 matches the 1.93 million of them. So it is looping in firmware, not stuck.
