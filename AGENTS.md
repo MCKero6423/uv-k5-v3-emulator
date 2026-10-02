@@ -844,6 +844,27 @@ called the firmware immediately. Separating them, all with the 2 ms PC probe on 
 So the three calls no surviving app had ever made are all harmless, and the surviving apps have covered the
 API surface Minesweeper uses. Its failure is in its own code. The next step is therefore an ordinary bisect:
 strip pieces out of its draw() until it survives, install each variant through the page and read the same
+
+**One clean A/B: the four calls Minesweeper makes, once, survive; wrapped in a for(;;) they never come back.**
+
+Same file, same call order, one variable -- measured on the page's own emulator with the 2 ms PC probe:
+
+| variant | body | result |
+| --- | --- | --- |
+| A | display_clear, print_tiny, get_key, delay_ms(40), then a spin | **runs** (2059 samples in the app, 1024 font reads) |
+| B | exactly those four, wrapped in for(;;) | **never seen again** (0 samples in the app, and the same 1024 font reads, so it did execute the first pass) |
+
+So the calls themselves are all fine individually and fine in sequence once; repeating them is what ends the app.
+
+**The metric needs fixing before the next round, and that is worth writing down.** "Samples inside the app"
+under-counts a *live* app: an app that spends its time inside long firmware functions shows up in the firmware
+side of the trace, which is exactly what a dead app looks like too. A loop containing only display_clear()
+scored 6, and loops containing only get_key() or only delay_ms() scored 0 -- and those three are not
+comparable results, they are one good measurement and two unreadable ones. The fix is to alternate a long
+self-contained spin with each call, so a live app is provably in the overlay most of the time and the trace
+separates the two cases.
+
+That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
 One measurement note: the flash probe's per-read lines were also the way the font read was spotted (1024 of
