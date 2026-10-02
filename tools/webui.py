@@ -480,7 +480,9 @@ def create_app(client, frame_addr: int = None, status_addr: int = None, scale: i
         # Power off, apply edit(path) to a working copy, power on again.
         if flash is None:
             raise RuntimeError("this server was started without flash control")
-        work = os.path.join(upload_dir(), "flash-current.img")
+        directory = upload_dir()
+        os.makedirs(directory, exist_ok=True)
+        work = os.path.join(directory, "flash-current.img")
         running = supervisor is not None and supervisor.is_running()
         if running:
             # Takes the emulator's own write-back with it, so an edit builds on what
