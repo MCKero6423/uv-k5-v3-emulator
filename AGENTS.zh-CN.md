@@ -2983,3 +2983,31 @@ static inline void KEYBOARD_InjectKey(uint8_t keyCode, bool keyLong)
 **断点因此往后移了一环 ✓：模型的行线与固件读回来的东西之间 —— `read_rows()`、`PIN_ROWS`、以及两者之间的 GPIO 接线** ✓。
 
 **那就是下一件要读、然后再测的东西，顺序如此** ✓ —— **而测量到来时，必须**在某一列确实被选中的瞬间**去采行线，而不是按固定的调用计数** ✓✓。
+
+**第 100 轮：按键链路每一环读起来都正确 —— 最后一个嫌疑是 GPIO 模型的 `pin-in` 那条路。**
+
+**第 99 轮点出的那一环读完了，数字对得上** ✓。**固件读整个输入端口、再掩出那几行** ✓：
+
+```
+#define PIN_MASK_ROWS   (LL_GPIO_PIN_15 | LL_GPIO_PIN_14 | LL_GPIO_PIN_13 | LL_GPIO_PIN_12)
+static inline uint32_t read_rows() { return PIN_MASK_ROWS & LL_GPIO_ReadInputPort(GPIOx); }
+```
+
+**而板级接线把模型的行接在正是那些引脚上** ✓：
+
+```
+for (int r = 0; r < KEYPAD_ROWS; r++)
+    qdev_connect_gpio_out_named(DEVICE(&s->keypad), "row", r,
+                                qdev_get_gpio_in_named(DEVICE(&s->soc.gpio[1]),
+                                                       "pin-in", KEYPAD_ROW_PIN(r)));
+```
+
+**`KEYPAD_ROW_PIN(r) = 15 - r` 与 `PIN_MASK_ROW(n) = 1 << (15 - n)` 相符** ✓。**列那边也相符 ✓，而且那段接线还带着一条注释：
+在行线存在之后要驱动一次初始电平 ✓ —— 因为设备的复位跑在接线之前 ✓，它那些 `qemu_set_irq` 本来会无处可去 ✓，而那样读起来就是「所有键同时被按住」** ✓。
+
+**所以整条链路现在读起来处处正确** ✓：**加载器的 `app_get_key` ✓、`KEYBOARD_GetKey` 与 `KEYBOARD_Poll` ✓、列线**（**一次运行被驱动 168 万次** ✓）**、`keypad_update_rows` 的判定 ✓、板级接线 ✓、`read_rows` 的掩码** ✓。**而固件仍然看不到键** ✗。
+
+**还有一环没读，而现在它是唯一剩下的一环** ✓：**GPIO 模型对送到它 `pin-in` 线上的一个电平做了什么 ✓，以及那个电平到底有没有到达固件所读的输入数据寄存器** ✓。
+**本文件在同一片区域已记过一个相关的坑** ✓ —— **未连接的输入空闲为高 ✓，因为键盘与拨键触点都是低有效 ✓，所以悬空的引脚必须读成「未按下」** ✓ —— **而那与「被刻意驱动的线」正好是相反的方向** ✓。
+
+**那就是下一件要读的东西 ✓，然后再用一件仪器去测它：在某一列确实被选中的瞬间采行线 ✓，而不是按固定的调用计数** ✓ —— **也就是第 99 轮写下的那条更正** ✓。

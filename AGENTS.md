@@ -3337,3 +3337,35 @@ and the GPIO wiring in between.
 
 That is the next thing to read and then to measure, in that order -- and the measurement, when it comes, has to
 sample the row lines while a column is actually selected rather than at a fixed call count.
+
+**Round 100: every link in the key chain reads correct, and the last suspect is the GPIO model's pin-in path.**
+
+The link round 99 named is read, and it agrees on numbers. The firmware reads the whole input port and masks
+the rows:
+
+    #define PIN_MASK_ROWS   (LL_GPIO_PIN_15 | LL_GPIO_PIN_14 | LL_GPIO_PIN_13 | LL_GPIO_PIN_12)
+    static inline uint32_t read_rows() { return PIN_MASK_ROWS & LL_GPIO_ReadInputPort(GPIOx); }
+
+and the board wires the model's rows to exactly those pins:
+
+    for (int r = 0; r < KEYPAD_ROWS; r++)
+        qdev_connect_gpio_out_named(DEVICE(&s->keypad), "row", r,
+                                    qdev_get_gpio_in_named(DEVICE(&s->soc.gpio[1]),
+                                                           "pin-in", KEYPAD_ROW_PIN(r)));
+
+with KEYPAD_ROW_PIN(r) = 15 - r matching PIN_MASK_ROW(n) = 1 << (15 - n). The columns match too, and the board
+wiring carries a comment about driving the initial row levels after the lines exist, because the device's reset
+runs before wiring and its qemu_set_irq calls would otherwise go nowhere -- which reads as every key held at once.
+
+So the whole chain now reads correct: the loader's app_get_key, KEYBOARD_GetKey and KEYBOARD_Poll, the columns
+(driven 1.68 million times a run), keypad_update_rows' rule, the board wiring, and read_rows' mask. The firmware
+still does not see a key.
+
+One link has not been read yet, and it is now the only one left: what the GPIO model does with a level delivered
+to its pin-in line, and whether that level reaches the input data register the firmware reads. This file already
+records a related trap in the same area -- unconnected inputs idle high because the keypad and the paddle
+contacts are active low, so a floating pin has to read as not pressed -- which is the opposite direction from a
+line that is deliberately driven.
+
+That is the next thing to read, and then to measure with a probe that samples the row lines while a column is
+actually selected rather than at a fixed call count, which is the correction round 99 wrote down.
