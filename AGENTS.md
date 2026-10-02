@@ -2582,3 +2582,33 @@ Where that leaves the work: the app loads, verifies and runs, so the open questi
 the app does after it starts -- and the round-17 finding stands as the last measured answer: it paints a
 complete frame, and a key press ends it. The next round should start from a running app and watch its
 behaviour, with no further attention to the overlay's contents.
+
+**Round 69: the symptom reproduced through the page's own endpoints, and the wall is inside draw().**
+
+Everything here goes through the browser UI's own HTTP interface -- POST /api/apps/1 with the .app bytes,
+POST /api/power/on, POST /api/key, GET /api/panel -- because that is the path the goal is about.
+
+    install -> code_size 2568, crc32 1612926066 (0x60234C72), name Minesweeper, slot 1
+    panel ink 485, source panel
+    after F     ink 484
+    after 7     ink 580        the app menu opens
+    after DOWN  ink 617        the selection moves
+    after MENU  ink 43         the screen drops to the launcher's title box alone
+    then 90 s, and a further MENU tap: ink 43 throughout
+
+That is the user-visible complaint, reproduced exactly, on the interface the user actually uses. The page
+reports source: panel, so it is drawing the controller's own memory, not a framebuffer guess.
+
+The app itself is not the old problem any more. Round 68 showed the six bytes previously read as corruption
+are the app writing its own variables, so the loader's checks pass and the app runs; and the source has no
+delay_ms left, so it is the build round 17 measured painting a frame. Its loop is spin, draw, get_key -- it
+does draw every pass.
+
+Ink 43 is the launcher's title box, drawn before the app is entered. A single display_clear() from the app
+would change it. So the app gets as far as its own initialisation -- round 68's probe saw it store to its
+globals in the first tenth of a second -- and does not get through its first draw().
+
+Next: time one draw() from inside the app. The cheapest version is an app that calls display_clear() and
+nothing else, then blits, and the panel says how long that took; round 17's equivalent measured about twenty
+seconds for a frame because of the firmware's font reads, so the question is whether this build is merely much
+slower than the polling window or stuck. A ten-minute watch of the same page would separate those two.
