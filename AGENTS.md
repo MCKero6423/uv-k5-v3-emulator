@@ -3489,3 +3489,35 @@ overall is what turned that into the number above.
 Next: put the machine's keypad cell mapping beside App/driver/keyboard.c's keyboard[5][4] table and find the
 disagreement. That is a comparison of two small tables, and it is now the only thing between this and a key that
 arrives.
+
+**Round 106: the two keypad tables agree cell for cell, so the cell mapping is not the gap.**
+
+The comparison round 105 asked for. The firmware's table, indexed [column][row]:
+
+    [0] SIDE1  SIDE2  INVALID INVALID
+    [1] MENU   1      4       7
+    [2] UP     2      5       8
+    [3] DOWN   3      6       9
+    [4] EXIT   STAR   0       F
+
+and the machine's names, indexed column * KEYPAD_ROWS + row so that the same cell is reached:
+
+    SIDE1 SIDE2 NULL NULL  MENU 1 4 7  UP 2 5 8  DOWN 3 6 9  EXIT STAR 0 F
+
+Cell for cell identical, F at index 19 in both, and keypad_set_press stores into
+pressed[index / KEYPAD_ROWS][index % KEYPAD_ROWS], which is the same [column][row] the firmware's table uses.
+Round 98's probe agrees as well: pressed=0x01000 is bit 12, which is column 3 row 0, DOWN -- the key pressed
+immediately before MENU in that sequence.
+
+So the hypothesis that the model's notion of a held cell disagrees with the firmware's table is refuted, and the
+search moves one link further along. What is left is whether the column level the firmware writes ever reaches
+the keypad model at all: the board connects each matrix column to the keypad's "col" line from the GPIO's
+"pin-out", and keypad_update_rows pulls a row low only when the held key's column is currently low. Round 105's
+reading had odr = 0x00000004 during an F hold -- bit 2 set, bits 3 to 6 clear -- so if those levels are delivered,
+column 4 is selected while F is held and row 3 must go low. It does not, and that is now the single remaining
+place for the fault.
+
+Next: read the GPIO model's output-to-pin-out path and check whether a write to the port's output register
+propagates to the connected lines at all -- in particular whether it propagates for the store the firmware
+actually uses, since SetOutputPin and ResetOutputPin on this vendor's part go through the set and reset
+registers rather than a plain store to ODR.
