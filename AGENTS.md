@@ -906,6 +906,23 @@ panel model at all** -- the gutted variant was only ever measured by its PC shar
 The second is cheap to settle: an app that does nothing but display_clear plus blit_full should visibly erase the
 launcher's title box.
 
+**Round 17: the game paints. What was missing was a per-frame delay, and the display path was never broken.**
+
+Three measurements settled it. A clear-and-blit app left the panel byte-identical, and filling the whole
+framebuffer through api->fb and blitting turned it from 43 non-zero bytes to 596 -- so an overlay app's
+framebuffer writes and blit_full do reach the panel, and the earlier reading of "the panel never changes"
+was about content, not plumbing. What actually blocked the frame was Minesweeper's own delay_ms(40) on the
+invalid-key path: in this emulator 40 ms of guest time is seconds of wall time, and a frame already spends
+roughly twenty seconds inside the firmware's font reads, so the frames were minutes apart. Removing that
+delay -- the loop redraws every pass anyway -- produced a complete frame within 24 s: the panel went from 43
+to 390 non-zero bytes, ink 1275, with the title, the counters and the field all legible in the dump.
+
+**Input is the remaining gap.** Pressing MENU changed nothing (596 -> 596) and pressing DOWN sent the app out
+of its loop altogether: the panel went back to the launcher's 43-byte title box, which happens only on the
+path that treats a key as EXIT. So get_key() is not returning the APP_KEY_* values this app compares against,
+or the keys are not reaching it as sent. The cheap way to find out is to have the app draw the raw key code
+it receives and read it off the panel, rather than guessing at the mapping.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
