@@ -2429,3 +2429,29 @@ overlay exactly once. Whatever the routine is called, nothing the loader writes 
 
 Next: identify 0x080175fe and 0x080047ca against the image itself rather than against a fetched file -- for
 instance by looking at what each calls and returns -- or fetch the sources for the exact build being run.
+
+**Round 62: the code loads byte-perfect and exactly six bytes change sixty milliseconds later. The memset is not the culprit.**
+
+Sampling the overlay every fifty milliseconds from the instant MENU is pressed:
+
+    before MENU  crc 169b5c51   matching  262/2568
+    +0.00 s      crc 60234c72   matching 2568/2568   EXACT
+    +0.06 s      crc 4f23f6f3   matching 2562/2568
+    ... every later sample identical
+
+60234c72 is the app's own CRC, so at that instant the overlay holds the code byte for byte and the loader's own
+verification would pass. Sixty milliseconds later exactly six bytes have changed -- the four-byte pointer
+0x0801D640, which appears once in the image, plus 28 0a -- and nothing changes after that.
+
+That retires round 59's reading. A memset that zeroes the whole 4 KiB overlay would change thousands of bytes,
+not six, so the hundred-a-second memset is not what stops the app. It is a separate routine doing something
+else, and the damage is a six-byte structure write.
+
+The two measurements together are what make this sharp: the offset that ends up wrong tracks the app's size
+(code_size - 124 for both the 2744-byte and the 2568-byte build), and the write is a pointer plus a small
+value. Something on the load path, which knows code_size, writes a six-byte structure at overlay + code_size
+- 124 just after the copy and before the app is entered.
+
+Next: watch those four bytes again, but ignore the memset and report only the first hit whose fill byte is not
+zero -- and if that is still the memset, watch a byte of the six that the memset does not clear, so the budget
+is not spent on it.
