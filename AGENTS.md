@@ -3613,3 +3613,33 @@ Two verified halves and an impossible middle is exactly the sort of state this f
 than smooth over, so both halves are recorded here with their numbers. The next step is to make one instrument
 report both facts in the same line -- the column change and the byte of s->pressed that call reads -- so the
 disagreement shows itself instead of being inferred from two separate counters.
+
+**Round 111: the correlation line never fires, and it fires on the wrong path anyway.**
+
+Two things came out of the correlation probe, and one of them is a mistake of mine. The instrument was built
+to print, in one line, the column change and the whole s->pressed matrix, for the first few column-low events
+after any key had ever been pressed. It printed nothing:
+
+    KEYDOWN lines: 0        keypad_key_changed never ran
+    COLTOTALS column_changes=1600000 with_key=0 ever=0
+
+ever=0 is correct and my flag was simply attached to the wrong path. keypad_key_changed is the qdev GPIO input
+handler -- the physical key matrix line -- and key injection does not use it: qom-set on the press property goes
+through keypad_set_press, which writes pressed[][] directly. The readback already proved that path works, so
+ever=0 says this line was never driven, which is true, and not that no key was pressed.
+
+So the contradiction is unchanged and now sharper. The cell is written by the injection path, verified by
+reading the property back; the scan runs 1.6 million times, verified by counting the writes; and the counter
+that reads the same array the injection writes still comes back zero. Whatever separates them is between
+keypad_set_press and keypad_update_rows, which are adjacent functions reading the same struct.
+
+There is also a smaller lesson worth keeping from the broken rebuild on the way here: the anchor I chose for the
+sticky flag's definition was bool pressed[KEYPAD_COLS][KEYPAD_ROWS];, which is a struct member rather than a
+statement, so the definition landed nowhere, the object file compiled and only the link failed. An undefined
+reference with a clean compile means the definition went somewhere that is not file scope -- check what the
+text you anchored on actually is before trusting the insertion.
+
+Next, and it is one step wide: dump s->pressed from keypad_set_press immediately after it writes the cell, and
+from keypad_update_rows on entry, so the value is seen at both ends of the shortest possible path rather than
+inferred from two counters. If the byte is set at the write and clear at the read, the answer is in whatever runs
+between them.

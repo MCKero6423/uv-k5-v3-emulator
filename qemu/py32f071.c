@@ -566,6 +566,9 @@ static void keypad_update_rows(UVK5KeypadState *s)
     }
 }
 
+/* ROUND 111: sticky flag -- has any key ever been pressed? */
+int ever_pressed_global = 0;
+
 static void keypad_col_changed(void *opaque, int line, int level)
 {
     UVK5KeypadState *s = opaque;
@@ -573,27 +576,32 @@ static void keypad_col_changed(void *opaque, int line, int level)
     if (line < 1 || line >= KEYPAD_COLS) {
         return;
     }
-    /* ROUND 110b: count the pairing over the WHOLE run -- no cap on the counting.
-     * 'selecting a column while a key on it is held' is the exact event the row
-     * rule acts on, so count that, and print the first few instances. */
+    /* ROUND 111: one line carrying both facts -- the column change and the whole
+     * s->pressed matrix -- for the first few changes that happen after a key has
+     * ever been pressed. Sticky flag, no cap on the counting. */
     {
+        extern int ever_pressed_global;
         static unsigned long changes = 0, with_key = 0, printed = 0;
         changes++;
-        if (level == 0) {
-            for (int pr = 0; pr < KEYPAD_ROWS; pr++) {
-                if (s->pressed[line][pr]) {
-                    with_key++;
-                    if (printed < 8) {
-                        printed++;
-                        fprintf(stderr, "COLWITHKEY n=%lu line=%d row=%d (changes so far %lu)\n",
-                                with_key, line, pr, changes);
-                    }
-                    break;
-                }
+        if (level == 0 && ever_pressed_global) {
+            int hit = -1;
+            for (int pr = 0; pr < KEYPAD_ROWS; pr++)
+                if (s->pressed[line][pr]) { hit = pr; break; }
+            if (hit >= 0) with_key++;
+            if (printed < 8) {
+                printed++;
+                fprintf(stderr, "CORR n=%lu line=%d level=%d hit=%d pressed=%d%d%d%d|%d%d%d%d|%d%d%d%d|%d%d%d%d|%d%d%d%d colhigh=%d%d%d%d%d\n",
+                        changes, line, level, hit,
+                        s->pressed[0][0], s->pressed[0][1], s->pressed[0][2], s->pressed[0][3],
+                        s->pressed[1][0], s->pressed[1][1], s->pressed[1][2], s->pressed[1][3],
+                        s->pressed[2][0], s->pressed[2][1], s->pressed[2][2], s->pressed[2][3],
+                        s->pressed[3][0], s->pressed[3][1], s->pressed[3][2], s->pressed[3][3],
+                        s->pressed[4][0], s->pressed[4][1], s->pressed[4][2], s->pressed[4][3],
+                        s->col_high[0], s->col_high[1], s->col_high[2], s->col_high[3], s->col_high[4]);
             }
         }
         if ((changes % 200000UL) == 0) {
-            fprintf(stderr, "COLTOTALS column_changes=%lu with_key=%lu\n", changes, with_key);
+            fprintf(stderr, "COLTOTALS column_changes=%lu with_key=%lu ever=%d\n", changes, with_key, ever_pressed_global);
         }
     }
     s->col_high[line] = level != 0;
@@ -611,6 +619,11 @@ static void keypad_key_changed(void *opaque, int line, int level)
         return;
     }
     s->pressed[col][row] = level != 0;
+    if (level != 0) {
+        extern int ever_pressed_global;
+        ever_pressed_global = 1;
+        fprintf(stderr, "KEYDOWN col=%d row=%d line=%d\n", col, row, line);
+    }
     keypad_update_rows(s);
 }
 
