@@ -1306,6 +1306,30 @@ Two measurements, one app at two sizes, settle it. At 2744 bytes the six corrupt
 fixed address being clobbered: it is the last 124 bytes of whatever was read that come out wrong.
 
 That also fits what already worked: the 24-byte marker app passed verification and ran, because 24 is shorter than
+
+**Round 53: the DMA run that loads the app is exactly right -- so the wrong bytes come from the flash model's response.**
+
+A diagnostic added to the model (UVK5_DMA_PROBE) prints every DMA run longer than 512 bytes. For the app load
+there is exactly one, and it is correct in every field:
+
+    DMA tx=4 rx=3 count=2568 tx_addr=0x20001338 rx_addr=0x20000280 tx_inc=0 rx_inc=1
+        tx_cndtr=2568 rx_cndtr=2568
+
+2568 bytes, destination exactly the overlay at 0x20000280, receive address incrementing, both channels agreeing
+on the count. So the DMA delivers everything to the right place.
+
+The overlay nevertheless ends up with six wrong bytes, at offsets 2444, 2445, 2446, 2447, 2451 and 2474 -- and the
+position is exactly code_size - 124, which held for both sizes measured (2744 -> 2620 and 2568 -> 2444). So the
+corruption is the last 124 bytes of the read, at a position that only the loader and the DMA know about.
+
+Since the DMA addresses and counts are right, the bytes themselves must be wrong: they are whatever the flash
+model returned through py25q16_xfer for those positions. The firmware's own flash probe records the command and
+length (addr=105000 len=2568) but not the bytes, which is why this looked like a memory corruption for so long.
+The next instrument is to log the bytes the flash model hands back near the end of a long read and compare them
+with the image.
+
+Everything else this round is unchanged: the trimmed app still fails with APP_ERR_CRC and the panel stays on the
+launcher's box (43), so the app still does not run.
 the damaged tail, while Minesweeper at 2568 and 2744 bytes always fails its CRC with APP_ERR_CRC and never runs.
 It is the same signature as the four DMA and flash faults this file already documents, and it retires the size
 ladder for good: short apps ran and long ones died, and the reason was never the size as such -- it was the tail of

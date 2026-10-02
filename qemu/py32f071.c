@@ -1957,6 +1957,22 @@ static void py32_dma_run_for_spi(PY32DmaState *s, PY32SpiState *spi)
     const bool tx_inc = tx >= 0 && (s->ch[tx].ccr & DMA_CCR_MINC);
     const bool rx_inc = rx >= 0 && (s->ch[rx].ccr & DMA_CCR_MINC);
 
+    /* Diagnostic, UVK5_DMA_PROBE: a long run is the app load, and the tail of the
+     * loaded data has been arriving wrong. Print what this run is actually told. */
+    {
+        const char *p = g_getenv("UVK5_DMA_PROBE");
+        if (p && count > 512u) {
+            FILE *f = fopen(p, "a");
+            if (f) {
+                fprintf(f, "DMA tx=%d rx=%d count=%u tx_addr=0x%08x rx_addr=0x%08x tx_inc=%d rx_inc=%d tx_cndtr=%u rx_cndtr=%u\n",
+                        tx, rx, count, tx_addr, rx_addr, (int)(tx >= 0 && (s->ch[tx].ccr & DMA_CCR_MINC)),
+                        (int)(rx >= 0 && (s->ch[rx].ccr & DMA_CCR_MINC)),
+                        tx >= 0 ? s->ch[tx].cndtr : 0, rx >= 0 ? s->ch[rx].cndtr : 0);
+                fclose(f);
+            }
+        }
+    }
+
     while (count > 0) {
         uint8_t out = 0xff;
 
