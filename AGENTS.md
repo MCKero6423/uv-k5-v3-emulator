@@ -2844,3 +2844,34 @@ That reinterpretation is cheap to test and it changes the shape of the remaining
 with a pattern rather than a constant and blit: if the panel shows the pattern, the whole display path from an
 overlay app works, MsZero and MsOnce and MsDraw and the game have all been running, and what remains is the
 game's own drawing. If the panel stays at 43 even then, the driver is skipping more than zero pages.
+
+**Rounds 81-82: the stripes paint. The display path works and the metric was the thing that was wrong.**
+
+The same fill-and-blit as MsZero, with a pattern instead of a constant -- fb[y][x] = (x & 1) ? 0xFF : 0x00,
+so every page holds both zero and non-zero bytes and no driver optimisation can skip them:
+
+    MsStripes.app code 72 B, crc32 0xD176B01A
+    boot            panel 485
+    after F 7 DOWN  panel 525    the app menu
+    after MENU      panel 491    and it stays there
+
+491 is not 525, so the panel took the app's frame. The whole display path works from an overlay app: fill
+the framebuffer, call blit_full, and the glass shows it.
+
+That confirms round 80's suspicion and overturns the reading that has been used for many rounds. A blit of
+0xFF reaches the panel -- fillff measured 939 -- and a blit of 0x00 does not change it, because the driver
+does not send pages that are all zero. So an app whose frame is black looks exactly like an app that never
+drew, and "the panel is still showing the launcher's title box" was never evidence that the app failed.
+MsZero, MsOnce, MsDraw and the game have all been running and drawing; the instrument was reporting on the
+content of their frames while being read as a statement about their survival.
+
+Two habits from this, both already in the file in other words. The first is the oldest one here: measure the
+thing you actually care about. Every one of those rounds intended to ask "did the app run", and the number it
+read answers "is the frame it drew mostly non-black", which is a different question with a different answer.
+The second is more specific and worth keeping: a device that omits work it considers unnecessary will make a
+correct result indistinguishable from no result at all, so a probe must use content it cannot skip.
+
+The next step is the game itself, on the row that launches, read the right way: its draw() paints a title, two
+counters and a field, and those are non-black, so a frame that reaches the glass will move the panel. What
+remains open is whether the game's own drawing produces such a frame, which is now a question the panel can
+actually answer.
