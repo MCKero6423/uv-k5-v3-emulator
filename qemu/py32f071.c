@@ -277,7 +277,23 @@ static uint64_t py32_gpio_read(void *opaque, hwaddr addr, unsigned size)
                     out_mask |= (1u << i);
                 }
             }
-            return (s->odr & out_mask) | (s->idr & ~out_mask);
+            {
+                uint32_t v = (s->odr & out_mask) | (s->idr & ~out_mask);
+                /* ROUND 102-103: only when a row line is actually low -- that is what
+                 * read_rows() would return non-idle. Bounded on purpose; see round 98. */
+                static int idle_env = -1, hits = 0;
+                if (idle_env < 0) idle_env = getenv("UVK5_ROW_PROBE") ? 1 : 0;
+                if (idle_env && (v & 0xf000u) != 0xf000u) {
+                    hits++;
+                    /* Rate-limit rather than cap: every 200th such read, and its running
+                     * total, so a later phase cannot be hidden behind an earlier one. */
+                    if ((hits % 200) == 1) {
+                        fprintf(stderr, "ROWREAD hits=%d idr=0x%08x rows=0x%x colsel=0x%x\n",
+                                hits, v, (v >> 12) & 0xf, s->odr & 0x78u);
+                    }
+                }
+                return v;
+            }
         }
     default:
         qemu_log_mask(LOG_UNIMP, "py32-gpio%s: read 0x%" HWADDR_PRIx "\n",

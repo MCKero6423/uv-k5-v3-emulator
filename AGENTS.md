@@ -3401,3 +3401,30 @@ polls rather than the way the resident loop polls.
 That is where the next measurement has to look, and it has to look at the read side rather than the drive side:
 log what read_rows() returns, and whether the three-read stability test inside KEYBOARD_Poll is ever met, while
 an overlay app is the one polling.
+
+**Rounds 102-103: the read side works -- 97 401 low-row reads -- and the phase question needs two runs.**
+
+The probe round 101 asked for sits where the guest reads GPIO_IDR and prints only when a row line is actually
+low, which is what read_rows() would return non-idle. It is rate-limited to one line per 200 such reads and it
+carries its own running total, deliberately: round 98's cap hid a later phase behind an earlier one, and that
+mistake was made again in this round's first version before being corrected inside the same round.
+
+    total low-row reads                97401
+    distinct column selections seen    0x70 0x68 0x38
+    distinct row patterns seen         0xe 0x7
+
+0x70, 0x68 and 0x38 are port B pins 3, 4 and 6 pulled low one at a time -- the four-column scan really running --
+and rows 0xe and 0x7 mean a row line really was low while that happened. So the firmware drives columns, selects
+them one at a time, and reads a low row back. The model is not withholding anything, and the count, about 1400
+reads a second, agrees with the scan rate derived in round 101.
+
+What this measurement did not settle is which phase produced those reads, and the reason is a sampling window:
+the four-second sampler ran from boot and its whole window fell before the first keypress, so it reported zero
+while the probe's own total, read at the end, was 97401. That is the same lesson this file already carries in
+another form -- a measurement has to cover the event it is looking for -- made again, this time in my own
+sampler rather than in the probe.
+
+So the next experiment is two runs, not one instrument: one session that only launches the app (the resident
+loop doing the polling), and one that gets the app running and then presses keys, comparing the probe's final
+totals. If the second total is near zero the app is not polling the matrix at all; if it is comparable, the
+matrix is being read and what fails is inside the firmware's own consumer.
