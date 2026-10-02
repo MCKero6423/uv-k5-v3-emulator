@@ -1168,6 +1168,27 @@ readings went 485 (main screen) -> 580 after F and 7 -> 627 after MENU, and 627 
 the screen never left the app menu, so the app was never entered and this run says nothing about the app.
 
 The useful part is what that exposed. The values I have been reading as "the app painted" -- 537, 549, 552,
+
+**Round 34: the app side is fully exonerated, and the firmware's own header names the mechanism.**
+
+Both preconditions from round 33 were met and the result is unambiguous. Driven at key.py's timing the
+sequence is coherent and reproducible: 485 -> 484 (F) -> 580 (7) -> 617 (DOWN) -> 43 on MENU, the launcher's
+box, i.e. the handover. And the oracle was a toggling app -- fill 0xFF and blit, fill 0x00 and blit, forever --
+whose panel signature no menu can produce. Fifty readings over twenty-five seconds were all exactly 43, none
+above 900, none blank: the app's blits never reach the glass.
+
+Then the offsets were checked properly, and the earlier reading of them was my own arithmetic error: the struct
+begins with uint8_t abi_major, uint8_t api_level and uint16_t api_size -- four bytes in total, not twelve -- so
+fb is at 4, display_clear at 8, and print_tiny at 28. The app's calls land exactly there. Header identical to
+the firmware's, entry pinned at offset 0, offsets correct, firmware answering status 0, handover confirmed:
+every part of the app side now has evidence behind it.
+
+What is left is between the app's call and the glass, and the firmware's own app_api.h states the mechanism:
+the app executes from the RAM buffer that is also the PY25Q16 sector cache, so no API callback may touch
+external flash while app_main() runs. blit_full talks to the panel over the same SPI bus the flash sits on,
+so a blit can reload the sector cache and overwrite the executing app -- which would look exactly like this:
+a call that returns no error, changes nothing, and leaves the app gone. The next step is to instrument the
+model's sector-cache path around a blit issued from an app, rather than the app.
 580, 596, 617, 627 -- are one family: the app menu, whose ink moves with the highlighted row. A genuine
 all-lit panel would be about 1024 non-zero bytes and has never been observed, and the game's own frame in
 round 17 was a different signature entirely (390 non-zero bytes with ink 1275, legible in the dump). So at
