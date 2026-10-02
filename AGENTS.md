@@ -2896,3 +2896,23 @@ left the question, but with an instrument that could not then tell a black frame
 The cheapest next cut is to combine what works with what does not: display_clear(), then the app's own stripe
 fill, then blit_full. If that paints, the sequence is fine and the game's failure is purely in what it draws;
 if it does not, the call sequence the game uses is itself part of the problem.
+
+**Round 84: clear, then fill, then blit paints -- so the display path is complete and the game is alone in failing.**
+
+The game's own sequence, with a stripe fill standing in for its drawing:
+
+    MsClearStripes.app code 80 B, crc32 0x0D75B311
+    boot ink 485, menu ink 526, then MENU -> ink 491 and it stays
+
+491 is exactly what plain MsStripes produces, so display_clear() followed by a fill and a blit_full() arrives on the
+glass unchanged. That retires round 79's reading as well: MsOnce and MsDraw blitted a black frame, the driver
+skipped its all-zero pages, and the panel kept the launcher's box. Their "failure" was correct behaviour.
+
+What is left is now narrow and well defined. An overlay app's display path works in every combination measured:
+fill then blit, and clear then fill then blit. The game alone produces no visible change over three minutes,
+which means either its frame is one the driver skips or its draw() never returns.
+
+The next cut separates exactly those two, and it is small: a variant that calls the game's own draw() once and
+then fills stripes and blits. If the stripes appear, draw() returned and its output is what the driver skips; if
+they do not appear, draw() never came back, and the search moves inside it -- which is where round 17 left it,
+measuring that a frame costs tens of seconds in font reads.
