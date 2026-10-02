@@ -2775,3 +2775,24 @@ app never writes the framebuffer at all.
 One thing to fix before the next use: ten thousand fprintf lines in half a minute is too chatty, and the run ended
 with the QMP connection dying partway. A cap, or a filter on the program counter, is needed -- and the same rule
 as always applies: cap it against a shape already known, which this log now provides.
+
+**Round 78: a 52-byte app that only clears and blits also fails, so the wall is display_clear().**
+
+The smallest app that uses the display path the game uses -- display_clear(), blit_full(), spin, and nothing
+else, no board, no font, no game logic -- is 52 bytes and gives the same result as the game:
+
+    MsDraw.app code 52 B, crc32 0x9D6B4FA3
+    boot ink 485, F 7 DOWN 525, MENU -> 43 and nothing further
+
+With round 72 in hand that is a narrow result. fillff, 44 bytes, writes api->fb directly and calls blit_full once,
+and it works: the framebuffer ends up 1024 bytes of 0xFF and the panel reaches 939. MsDraw does exactly the same
+blit, and differs in one visible way -- it calls display_clear() every pass. fillff never calls it.
+
+So the failure that has been chased for many rounds is, at this point, one API call wide. Two 52-byte apps
+settle it: one that calls display_clear() and nothing else, and one that calls blit_full() and nothing else.
+Whichever of those reproduces the 43, that is the call that ends an app -- and it is also the shape of the fix,
+because a game that draws without it is a game that runs.
+
+Worth noting what ink 43 is: the launcher's title box, the screen the firmware drew before entering the app. So
+the app does not repaint, and it also never takes the EXIT path back to the app menu -- the state is the one
+round 21 described, a launcher that has taken the screen and then never reaches the app.
