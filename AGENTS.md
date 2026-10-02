@@ -1103,6 +1103,27 @@ from the page. Until it is, no ladder can be walked and verified playable cannot
 should therefore treat the launcher's own key handling as the subject: the same presses, read back after each
 one, and the model's keypad path instrumented rather than the app's.
 
+**Round 29: press timing decides whether the sequence is coherent at all, and the launcher refuses some apps before running anything.**
+
+Two things were measured. First, the page's key endpoint defaults to TAP_MS = 60 with no gap when a request
+omits hold_ms -- which is what every curl in the last rounds did -- while tools/key.py, the one the repo's own
+keypad test validates, uses 200 ms and then waits GAP_MS = 400 for the release to be debounced. Driving the
+sequence at the page default gave readings that did not cohere (F and 7 both around 460, sometimes no menu at
+all); driving it with key.py's timing gave 485 -> 484 (F) -> 580 (7) -> 617 (DOWN) -> 43 (MENU), i.e. a menu
+and then a handover. Any sequence that matters should therefore pass hold_ms = 200 and leave 400 ms after each
+key.
+
+Second, and more useful: with the handover reachable, the same sequence was run with the real Minesweeper and
+with a 256-byte fill-and-blit toy. Minesweeper reaches 43 -- the launcher's box, i.e. it handed over -- where
+the toy never leaves the menu (582). The launcher therefore distinguishes the two before either runs, so the
+question is not how large an app can be before it dies but which apps the launcher accepts and launches at all.
+That also retires the code-size framing of rounds 27 and 28: the toy is smaller and is the one that is not
+launched.
+
+Next: read the launcher's own acceptance test out of the firmware instead of guessing at it. The header fields
+are the obvious first place -- caps, api_min, abi, entry_off, flags -- and the difference between the header
+this page writes and the one an upstream app carries is the thing to diff.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
