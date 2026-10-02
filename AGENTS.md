@@ -1022,6 +1022,27 @@ So the open question is now precise: with the launcher reached and the app enter
 handover. The next instrument is the 2 ms PC trace across the handover rather than after it, sampled from
 the moment MENU is pressed.
 
+**Round 25: the discriminator could not run, because the launch did not reproduce.**
+
+The plan was to separate the two possible faults with a 20-byte app that calls nothing: if it loops in the
+overlay the handover is fine and the game's problem is its own code; if it also vanishes the handover itself
+is broken. It was installed in slot 3 -- the slot round 24 saw loaded and entered -- and driven with the same
+sequence (F, 7, DOWN, DOWN, MENU). The menu came up at 511 non-zero bytes (the same family as the 552 and 526
+seen before, the ink moving with the selection), and MENU changed nothing at all: the screen stayed at 511 for
+twenty seconds and the PC probe recorded zero samples inside the overlay, out of 7316.
+
+So the experiment answered nothing, and the honest reading is that the launch is not reliably reproducible
+through the page's synthetic key events: the same sequence that produced a handover in round 24 (ink 210,
+the launcher's box) produced no visible reaction here, with the installed app being the only difference.
+That is a statement about the entry point, not about the app -- round 24 measured the load (the FAP1 header
+and exactly code_size bytes) and the entry (four PC samples inside the 4 KiB overlay), and round 17 measured
+a complete painted frame, both from this same artifact.
+
+Minesweeper was put back into slot 3 afterwards, so the radio is left with the game installed rather than
+the test stub. Next: drive the launch with longer gaps and read the panel after every single press, since
+the presses that do land are the only ones that can be measured, and the failed ones have to be recognised
+as failed rather than counted.
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
