@@ -2895,3 +2895,29 @@ GCC 在 `-O2` 下会证明每个元素仍是 NULL ✓、注意到 `qemu_set_irq(
 **一个机制，两半现象** ✓。**下一步：读 `SYSTICK_DelayUs` 与机器的 SysTick 计数器模型** ✓。
 **若那个计数器在 QEMU 定时器上推进、与中断无关 ✓，这个假设就死了 ✓、该负责的是轮询里别的东西 ✓；
 若那条延迟等的是一个中断驱动的标志 ✓，它就是答案 ✓，而修法在模型一侧 —— 让那个标志对一个在中断被屏蔽下运行的程序也可观察** ✓。
+
+**第 97 轮：SysTick 那条假设死了 —— 机器是故意给轮询加速的。**
+
+**第 95、96 轮留下了一个机制** ✓：**`KEYBOARD_Poll` 为每一列、每一次轮询都调 `SYSTICK_DelayUs(10)` ✓，
+所以「延迟在覆盖区路上不返回」会让应用卡在第一次轮询里（MsKeys ✓）或在跑完 `draw()` 之后的 `get_key()` 里（游戏 ✓）** ✓。**读机器就能定案，而答案是否** ✗。
+
+**`qemu/py32f071.c` 早就把这个顾虑写下来并实现了** ✓：
+
+```
+Accelerate SysTick polling. SYSTICK_DelayUs busy-reads the current-value register and
+accumulates differences; under emulation the counter barely moves between reads, and a
+measured 120 ms delay needed about 7.7 hours of wall time. Advancing the timer on each read
+makes those loops converge.
+
+qdev_prop_set_uint32(DEVICE(&s->armv7m.systick[0]), "poll-boost", 24000);
+```
+
+**而 3903 行那条注释从配速一侧说的是同一件事** ✓：**时钟按 48 MHz 设 ✓，但那个循环依赖的是「一次读跨过多少 tick」而不是真实时间** ✓。
+**所以只要有人读 `SysTick->VAL`，计数器就前进** ✓。**`SYSTICK_DelayUs` 在主循环里收敛 ✓，在覆盖区应用里同样收敛 ✓ —— 扛了第 95、96 两轮的那条假设就此作废** ✓✓。
+
+**这一点值得明说，因为它是当时可用的最好解释、而现在没有了** ✓：**按键链路在每一个能读的层面上都已被核实为正确 ✓ ——
+加载器的 `app_get_key` ✓、`KEYBOARD_GetKey` 与 `KEYBOARD_Poll` ✓、键盘模型的列与行逻辑 ✓、以及轮询所依赖的那条延迟** ✓。**而按键仍然不到达** ✗。
+
+**剩下的事情更窄，而且现在是一个模型侧的问题、不是固件侧的问题** ✓：**在覆盖区应用占着前台时，列线与行线到底有没有被驱动和被读取** ✓。
+**下一件仪器正是本文件一直开的那一张方子 —— 把探针放进模型、而不是放进客体** ✓：**在覆盖区应用轮询的同时，数 `keypad_update_rows()` 被调用的次数、并记下它算出了什么 ✓，
+再与驻留主循环轮询时的同一个计数相比** ✓。**若模型从未被问过 ✓，或两种情况问出来的答案一样 ✓，那么差别就在阅读与猜测都还没够到的地方** ✓。

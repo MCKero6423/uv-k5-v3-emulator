@@ -3235,3 +3235,34 @@ One mechanism, both halves. Next: read SYSTICK_DelayUs and the machine's SysTick
 advances on a QEMU timer regardless of interrupts, the hypothesis dies and something else in the poll is
 responsible; if the delay waits on an interrupt-driven flag, it is the answer and it is a model-side fix to make
 that flag observable to a program running with interrupts masked.
+
+**Round 97: the SysTick hypothesis dies -- the machine boosts the polling by design.**
+
+Round 95 and 96 left one mechanism standing: KEYBOARD_Poll calls SYSTICK_DelayUs(10) for every column on every
+poll, so a delay that does not return on the overlay path would hang the app inside its first poll (MsKeys) or
+inside get_key() after a completed draw() (the game). Reading the machine settles it, and the answer is no.
+
+qemu/py32f071.c already documents and implements exactly this concern:
+
+    Accelerate SysTick polling. SYSTICK_DelayUs busy-reads the current-value register and
+    accumulates differences; under emulation the counter barely moves between reads, and a
+    measured 120 ms delay needed about 7.7 hours of wall time. Advancing the timer on each read
+    makes those loops converge.
+
+    qdev_prop_set_uint32(DEVICE(&s->armv7m.systick[0]), "poll-boost", 24000);
+
+and a second note at 3903 says the same thing from the pacing side: the clock is set to 48 MHz but the loop
+depends on how many ticks a read spans, not on real time. So the counter advances on every read of SysTick->VAL
+whoever is reading it. SYSTICK_DelayUs converges in the main loop and inside an overlay app alike, and the
+hypothesis that carried rounds 95 and 96 is dead.
+
+That is worth stating because it was the best explanation available and it is gone: the key path is now
+verified correct at every layer that can be read -- the loader's app_get_key, KEYBOARD_GetKey and KEYBOARD_Poll,
+the keypad model's column and row logic, and the delay that the poll depends on. The key still does not arrive.
+
+What is left is narrower and is now a model-side question rather than a firmware one: whether the columns and
+rows are actually driven and read while an overlay app owns the foreground. The next instrument is the one this
+file always prescribes -- put the probe in the model, not the guest: count keypad_update_rows() calls and record
+what they compute, while an overlay app polls, and compare that with the same count while the resident loop
+polls. If the model is never asked, or is asked and answers the same in both cases, the difference is
+somewhere neither reading nor guessing has reached yet.
