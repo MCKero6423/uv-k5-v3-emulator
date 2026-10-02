@@ -1043,6 +1043,23 @@ the test stub. Next: drive the launch with longer gaps and read the panel after 
 the presses that do land are the only ones that can be measured, and the failed ones have to be recognised
 as failed rather than counted.
 
+**Round 26: the launch is a question of which row is selected, and the handover works when it holds an app.**
+
+The menu lists sixteen slots, and after the pristine image was restored only slot 3 held a real app -- slots
+0 to 2 read as factory data, which the page calls "unknown". Every failed launch in the last rounds had the
+cursor left on one of those, which is why MENU sometimes did nothing and sometimes produced the launcher's box
+with the keys dead. Round 17's F, 7, DOWN x3, MENU worked because three presses happened to land on slot 3.
+
+The test that settles it: install the game into slots 0, 1 and 2 as well, so every row holds it, then open the
+menu (ink 617, more rows) and press MENU once. The screen drops to 43 -- the launcher's title box, i.e. it has
+handed over -- and at t+40 s it reaches 484, the radio's own main screen, so the app ran and then returned.
+Both halves are now visible: the handover happens, and the app comes back out.
+
+The radio is deliberately left with the game in slots 0 through 3, because that makes the launch reliable for
+whoever clicks through the page: whatever row the cursor lands on, MENU starts the game. Two menu entries --
+launching the game and getting out of it -- are now the things to measure next, along with why the app returns
+instead of staying up (round 17 saw it paint a full frame from this same artifact).
+
 That is where the next round starts: the same alternating-spin shape, one call at a time.
 trace. That is a much better place to be than the emulator mystery this started as.
 
