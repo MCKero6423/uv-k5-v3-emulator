@@ -1151,6 +1151,25 @@ Breakout, Cube3D, Beam), every field lines up -- entry_off 0, flags 0x0001 for B
 name at offset 20, version at 36, link_vma 0x20000280 byte-for-byte identical -- so pack_app.py is right and
 the refusal theory is dead. The entry point: the assembly listing's first function is app_main, its prologue
 push.w {r4-r11, lr} matches the blob's first bytes f0 b5 exactly, and the linker script pins .text.entry to
+
+**Round 32: the header is byte-identical to the firmware's own, and the font-read inference is suspect.**
+
+The working copy's app_api.h and the firmware's own, fetched from armel/uv-k1-k5v3-firmware-custom over
+HTTPS, are the same 14403 bytes with the same sha256 -- so round 31's prime suspect, that the app was
+compiled against a different layout, is wrong and is withdrawn. Reading the offsets back out of the
+assembly confirms the calls are right as well: the member at offset 28 is print_tiny and the one at 8 is
+display_clear, exactly where this app's source expects them.
+
+That leaves the measurement those conclusions rested on in doubt. The claim was that draw() is never
+reached because the flash probe records no font read after the app's code load. But the session shows
+1446 reads of the font region early on, which is what caching the font in RAM looks like -- and if the
+font is cached, print_tiny never touches the external flash at all, so "no font read" says nothing about
+whether draw() ran. The instrument, not the app, is what was measured.
+
+So the next oracle has to be one that cannot be confused this way: something visible in the panel and in
+nothing else. The sharpest unexplained fact is still that fill-every-byte-and-blit as the app's very first
+statement leaves the panel untouched, while the same act from a 320-byte app lights it; that contrast needs
+re-measuring with the app doing nothing else at all, and with the panel read before and after in one run.
 offset 0. And the acceptance: the firmware answers status 0 for the app over 0x0730.
 
 What is left is sharper than anything so far. The listing shows the app doing exactly what it was written to
