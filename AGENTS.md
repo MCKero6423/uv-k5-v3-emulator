@@ -2504,3 +2504,29 @@ already exists; it just has to run before the measurement rather than after it.
 
 This is the same rule the file has carried for many rounds in other words -- a measurement must be able to show
 the thing it is looking for -- applied to the launcher step that all of these runs depend on.
+
+**Rounds 65-66: the watchpoint itself prevents the launch, which is why three runs in a row saw nothing.**
+
+Arming the write watchpoint before pressing the keys, then polling the overlay while draining gdb stops,
+gives:
+
+    summary: matched=None diverged=None   memset hits=60   other hits=0
+
+The overlay never matched the app, so the launch did not happen again -- and the numbers say why. The watched
+word is inside the region the firmware memsets about a hundred times a second, and every one of those hits
+halts the guest until the debugger resumes it. Sixty hits were drained in the loop here, four hundred in
+round 64 and four thousand in round 63. The guest spends those windows stopped, its key handling never gets
+far enough, and the launch never completes.
+
+That is the whole explanation for three consecutive null results, and it lines up with the runs that did work:
+round 62 had no watchpoint and the overlay held the code byte for byte; rounds 56 and 59 had none either. The
+correlation is not that the app sometimes fails to launch -- it is that attaching this watchpoint stops it.
+
+It is also this file's own first rule, in the form it keeps taking: instrument the model, not the guest. A
+debugger that halts the target perturbs exactly the timing being measured, and here it perturbs it enough to
+prevent the event.
+
+The fix is a write callback in qemu/py32f071.c over those four bytes -- memory_region_init_io plus
+memory_region_add_subregion_overlap, logging the PC and then forwarding to RAM -- so the guest never stops.
+The gdb watchpoint cannot be made conditional: the remote protocol's Z2 has no condition in this stub, and
+the address cannot be moved out of the memset's range because the damage is inside it.
