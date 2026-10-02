@@ -3643,3 +3643,40 @@ Next, and it is one step wide: dump s->pressed from keypad_set_press immediately
 from keypad_update_rows on entry, so the value is seen at both ends of the shortest possible path rather than
 inferred from two counters. If the byte is set at the write and clear at the read, the answer is in whatever runs
 between them.
+
+**Round 112: the probe is in the binary and still never prints -- so the property and the matrix are two different objects.**
+
+The both-ends dump had one job: print s->pressed from keypad_set_press straight after it writes the cell, and
+from keypad_update_rows on entry. Neither printed, and chasing that produced the round's real finding.
+
+The value really is set. Driving the property over QMP, with every reply printed rather than assumed:
+
+    qom-get press (before)      -> ''
+    qom-set press F             -> {}
+    qom-get press (after set)   -> 'F'
+    qom-get press (3 s later)   -> 'F'
+    qom-set press empty         -> {}
+    qom-get press (after clear) -> ''
+
+and SET lines: 0, UPD lines: 0, with 3488 bytes of stderr so nothing was truncated. The obvious suspect was
+a stale binary, and it is not: the built executable contains the probe's format string.
+
+    qemu-system-arm.exe mtime 2026-10-02T08:27:55Z, 81653687 bytes
+      SET name=%s      PRESENT at 0xce16e8
+      UPD %s[4][3]     PRESENT at 0xce1310
+      CORR n=          ABSENT     (round 111's block, removed as intended)
+      GPIOCOLCHG       PRESENT at 0xce2368
+
+So the instrumentation is compiled in, the property setter is registered as that property's setter, the QMP
+command succeeds, the getter reads the value back -- and the setter never runs. The only shape that fits is
+that the object QMP set the property on is not the object wired to the keypad matrix: the readback succeeds on
+whichever object was written, and keypad_update_rows, called 1.6 million times from the column lines, reads the
+other one.
+
+That single sentence accounts for every reading since round 105 -- the cell set and verified, the scan running
+at full rate, and the two never meeting. It also retires the reading of round 110's with_key=0: the counter was
+correct and it was counting on the object the firmware talks to, which is not the one being poked.
+
+The confirmation is one line in each place: print (void *)s from keypad_set_press and from keypad_col_changed.
+If the pointers differ, the board creates its keypad under a name that is not the one the QMP path resolves, and
+every host-side key injection in this session has been landing on a second, unwired instance.
