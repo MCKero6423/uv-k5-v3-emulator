@@ -1272,6 +1272,27 @@ reads back as all 0xFF at t+2, +5, +10 and +15 s and never as 0xDEADBEEF. The ap
 never executed: APP_LaunchOverlay does not reach its entry(&app_api) call at line 1162.
 
 That closes the bracket. Between the copy at line 1113 and the call at line 1162 the function's only return is the
+
+**Round 47: RADIO_SetupRegisters is exonerated, round 46's narrowing is withdrawn, and the marker test is verified sound.**
+
+The function turned out to live in App/radio.c, not App/app/radio.c, and read from there it is 179 lines with
+exactly one loop: while (1) { if ((BK4819_ReadRegister(BK4819_REG_0C) & 1u) == 0) break; write(REG_02, 0); delay(1); }.
+The model keeps that register at 0x0000 -- its own comment says REG_0C bit 0 must stay clear because two places in
+app.c spin on it with no timeout, and it was fixed once already -- and reading the running emulator's reg0c over
+QOM confirms 0x0000 with bit 0 clear at every sample, before and after the launch. So that loop exits immediately
+and RADIO_SetupRegisters cannot be where the firmware stops. Round 46's conclusion is withdrawn.
+
+The marker test itself holds up. Decoding the blob shows sub sp, #4; ldr r0,[pc,#12]; ldr r1,[pc,#12]; str r1,[r0]
+with the literals 0x20003F00 and 0xDEADBEEF in the pool, so an app that runs really does write the magic, and it
+never appears. entry() is not reached. What is not settled is why: with the copy verified present in the overlay and
+the CRC matching on paper, the remaining candidates are the two early returns before the call (the VMA check and the
+CRC check) and whether the copy the memsave saw came from this launch at all.
+
+Two method notes. My Thumb bit-field decode was wrong twice in this round (Rn and Rt are the low six bits, and the
+halfwords are read little-endian), which made a correct instruction look like a different one -- the hex bytes were
+right and my reading of them was not, which is the same class of mistake this file records elsewhere. And the BK4819
+register file is readable over QOM as /machine/bk4819: reg0c, which is a cheap way to check what a polling program
+actually sees without a probe of any kind.
 CRC check at line 1115 -- and the CRC is right (MB_Crc32Bytes is an ordinary CRC-32 and the host tool's value is
 exactly what it computes). So the function cannot be returning early: it is stuck in between, and the only
 hardware-touching statement there is RADIO_SetupRegisters(true) at line 1159. The PC sitting in the PY32 SPI
